@@ -6,6 +6,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
 import numpy as np
+if __package__:
+    from .usb_camera import open_capture
+else:
+    from usb_camera import open_capture
 
 
 def detect_motion(previous_gray, gray):
@@ -30,18 +34,13 @@ class Camera:
                 self.device.close()
                 raise
         else:
-            self.device = cv2.VideoCapture(index)
-            if not self.device.isOpened():
-                self.device.release()
-                raise RuntimeError(f'Cannot open webcam {index}. Check camera permission/device.')
-            self.device.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.device.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.device = open_capture(index, v4l2=source == 'usb')
 
     def read(self):
         if self.pi:
             return self.device.capture_array('main')
         ok, frame = self.device.read()
-        if not ok:
+        if not ok or frame is None:
             raise RuntimeError('Cannot read camera frame; camera disconnected or unavailable.')
         return frame
 

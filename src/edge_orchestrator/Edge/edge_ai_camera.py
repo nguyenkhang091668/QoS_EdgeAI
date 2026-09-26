@@ -8,6 +8,10 @@ from typing import Optional
 import cv2
 import numpy as np
 if __package__:
+    from .usb_camera import open_capture
+else:
+    from usb_camera import open_capture
+if __package__:
     from .layer5_ai import Detector
 else:
     from layer5_ai import Detector
@@ -49,9 +53,10 @@ class EdgeAICamera:
 
     def __init__(self, model_path=None, camera_index=0, confidence=.5, classes=80,
                  threads=4, cooldown=2., *, detector=None, capture_factory=None,
-                 clock=time.monotonic):
+                 clock=time.monotonic, v4l2=False):
         self.model_path = Path(model_path) if model_path else Path(__file__).with_name('yolov8n.pt')
         self.camera_index = camera_index
+        self.v4l2 = v4l2
         self.confidence, self.classes, self.threads = confidence, classes, threads
         self.cooldown = cooldown
         self._detector = detector
@@ -81,15 +86,8 @@ class EdgeAICamera:
             if self._capture is not None:
                 return self
             self._initialize()
-            cap = self._capture_factory(self.camera_index)
-            try:
-                if not cap.isOpened():
-                    raise RuntimeError(f'Cannot open USB camera {self.camera_index}')
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            except Exception:
-                cap.release()
-                raise
+            cap = open_capture(self.camera_index, v4l2=self.v4l2,
+                               capture_factory=self._capture_factory)
             self._capture = cap
             # Do not compare a prior externally supplied frame to the new camera.
             self._pipeline = Pipeline(self._detector, self.cooldown, clock=self._clock)
