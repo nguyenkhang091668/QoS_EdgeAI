@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DATN - Edge Orchestrator Central Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header>
+        <h1>EDGE ORCHESTRATOR <span>| Central Dashboard</span></h1>
+        <div style="display: flex; gap: 1.5rem; align-items: center;">
+            <div style="color: var(--text-secondary); font-family: monospace; font-size: 0.9rem;" id="sys-time">00:00:00</div>
+            <div class="status-badge badge-connecting" id="statusBadge"><span id="statusText">ĐANG KẾT NỐI...</span></div>
+        </div>
+    </header>
+
+    <div class="dashboard-container">
+        <!-- Khu vực Camera Feed (Bên Trái) -->
+        <div class="glass-panel" style="display: flex; flex-direction: column; gap: 1rem;">
+            <div class="panel-header">
+                <div class="panel-title">Video Surveillance (Live)</div>
+            </div>
+            <div class="camera-grid">
+                <div class="camera-feed">
+                    <div class="cam-label">USB WEBCAM (CAM04)</div>
+                    <img src="{{ url_for('video_feed') }}" alt="Live USB Webcam Stream" id="videoFeed" ondblclick="toggleFullscreen()" style="cursor: pointer;">
+                </div>
+                <!-- Có thể mở rộng thêm khung cho CAM01, CAM02 (GNS3) tại đây -->
+                <div class="camera-feed" style="display: flex; align-items: center; justify-content: center;">
+                    <div class="cam-label">PI CAMERA (CAM_PI)</div>
+                    <span style="color: var(--text-secondary); font-size: 0.9rem;">[STANDBY - NO SIGNAL]</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Khu vực Telemetry & QoS (Bên Phải) -->
+        <div class="glass-panel" style="display: flex; flex-direction: column; gap: 1rem;">
+            <div class="panel-header">
+                <div class="panel-title">Network Telemetry (QoS)</div>
+            </div>
+            
+            <div class="telemetry-table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Device</th>
+                            <th>IP</th>
+                            <th>Port</th>
+                            <th>Bitrate</th>
+                            <th>Loss</th>
+                            <th>Jitter</th>
+                        </tr>
+                    </thead>
+                    <tbody id="telemetry-body">
+                        <!-- Dữ liệu sẽ được render bằng JS qua API -->
+                        <tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">Waiting for data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>

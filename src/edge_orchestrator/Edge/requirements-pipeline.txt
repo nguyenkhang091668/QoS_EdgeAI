@@ -1,0 +1,2 @@
+# Compatibility entry point; shared versions are maintained in requirement.txt.
+-r ../../../requirement.txt

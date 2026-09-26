@@ -1,0 +1,56 @@
+# Môi trường Python
+.venv/
+.venv-*/
+.khang/
+**/.venv/
+
+# Cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# Cấu hình và khóa riêng
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Tài nguyên và kết quả thử nghiệm
+*.pt
+*.tflite
+*.mp4
+*.avi
+*.log
+
+# Dịch vụ streaming cục bộ
+mediamtx/
+
+# Cấu hình thiết bị thật — có thông tin xác thực
+/R1.txt
+/R2.txt
+/DSW1.txt
+/DSW2.txt
+/ASW.txt
+
+# Local editor settings, backups and generated figures
+.vscode/
+.idea/
+dependency-backups/
+/Gemini_Generated_Image_*.png
+/bieu_do_*.png
+
+# Additional environments, caches and credentials
+venv/
+env/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
