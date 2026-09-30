@@ -10,8 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(
 try:
     from netmiko import ConnectHandler
 except ImportError:
-    print("[ERROR] Thư viện netmiko chưa được cài đặt. Vui lòng chạy: pip install netmiko")
-    sys.exit(1)
+    ConnectHandler = None
 
 import paramiko
 
@@ -44,7 +43,10 @@ class NetworkController:
         device_info = DEVICE_ACCESS_MAP.get(target_device)
         if not device_info:
             raise ValueError(f"Không tìm thấy thiết bị {target_device} trong DEVICE_ACCESS_MAP!")
-            
+        if ConnectHandler is None:
+            raise RuntimeError(
+                "Netmiko chưa được cài đặt."
+            )
         self.target_ip = device_info["ip"]
         self.target_port = device_info["port"]
         self.target_name = target_device
