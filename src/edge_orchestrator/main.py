@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import sys
 import argparse
 from PyQt5.QtWidgets import QApplication
@@ -49,6 +50,17 @@ def main():
         return 1
 
     # Khởi động GUI
+    # Wheel opencv-python trên Linux tự trỏ Qt về plugin đi kèm
+    # OpenCV. Dashboard dùng PyQt5 hệ thống nên phải bỏ đường dẫn này
+    # trước khi tạo QApplication.
+    qt_plugin_path = os.environ.get(
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "",
+    )
+    if "cv2/qt/plugins" in qt_plugin_path:
+        os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+        os.environ.pop("QT_QPA_FONTDIR", None)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
