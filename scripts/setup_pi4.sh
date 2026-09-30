@@ -24,25 +24,24 @@ echo ""
 # ─── BƯỚC 1: Cập nhật hệ thống ───────────────────────────────────────────────
 echo -e "${YELLOW}[BƯỚC 1/9] Cập nhật apt packages...${NC}"
 sudo apt-get update -qq
-sudo apt-get upgrade -y -qq
 echo -e "${GREEN}  ✓ System updated${NC}"
 
 # ─── BƯỚC 2: Cài các dependencies hệ thống ───────────────────────────────────
 # Các dependency dành riêng cho Pi được cài qua requirement_pi.txt.
 echo -e "${YELLOW}[BƯỚC 2/9] Cài system dependencies...${NC}"
-sudo apt-get install -y -qq \
+sudo apt-get install -y \
     python3-pip python3-venv python3-dev \
-    libatlas-base-dev libopenjp2-7 libtiff5 \
+    libopenblas-dev libopenjp2-7 libtiff6 \
     libavcodec-dev libavformat-dev libswscale-dev \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libgl1-mesa-glx libglib2.0-0 \
+    libgl1 libglib2.0-0t64 \
     iperf3 \
     net-tools curl wget git
 echo -e "${GREEN}  ✓ System dependencies cài xong${NC}"
 
 # ─── BƯỚC 3: Cài PyQt5 cho Pi (cần cài từ apt, không phải pip) ──────────────
 echo -e "${YELLOW}[BƯỚC 3/9] Cài PyQt5 cho Raspberry Pi...${NC}"
-sudo apt-get install -y -qq python3-pyqt5 python3-pyqt5.qtwidgets
+sudo apt-get install -y python3-pyqt5
 echo -e "${GREEN}  ✓ PyQt5 cài xong${NC}"
 
 # ─── BƯỚC 4: Tạo Virtual Environment ─────────────────────────────────────────
