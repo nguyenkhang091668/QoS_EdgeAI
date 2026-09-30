@@ -54,3 +54,6 @@ htmlcov/
 *.pfx
 id_rsa*
 id_ed25519*
+
+*.pt
+!src/edge_orchestrator/Edge/yolov8n.pt

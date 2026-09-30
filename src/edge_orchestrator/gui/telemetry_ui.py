@@ -23,6 +23,7 @@ class QoSTelemetryUI(QWidget):
         
         # Dữ liệu nội bộ để vẽ đồ thị
         self.max_history = 30
+        self.history_data = {}
         self.init_ui()
 
     def init_ui(self):
