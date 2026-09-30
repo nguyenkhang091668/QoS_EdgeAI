@@ -39,7 +39,14 @@ def main():
     print("="*65 + "\n")
 
     # Khởi động Syslog Receiver trong background
-    start_syslog_server(port=args.port, simulate=sim_syslog)
+    try:
+        start_syslog_server(
+            port=args.port,
+            simulate=sim_syslog,
+        )
+    except RuntimeError as error:
+        print(f"[SYSLOG ERROR] {error}")
+        return 1
 
     # Khởi động GUI
     app = QApplication(sys.argv)
@@ -67,4 +74,4 @@ def main():
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

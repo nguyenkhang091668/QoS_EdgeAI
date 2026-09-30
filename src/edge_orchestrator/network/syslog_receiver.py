@@ -212,10 +212,14 @@ def start_syslog_server(port: int = None, simulate: bool = False):
         print(f"{Colors.RED}  ✗ Permission denied cho port {actual_port}!{Colors.RESET}")
         print(f"  Thử 1: sudo python syslog_receiver.py")
         print(f"  Thử 2: python syslog_receiver.py --port {SYSLOG_FALLBACK_PORT}")
-        sys.exit(1)
+        raise RuntimeError(
+            f"Không bind được Syslog UDP port {actual_port}"
+        )
     except OSError as e:
         print(f"{Colors.RED}  ✗ Lỗi bind socket: {e}{Colors.RESET}")
-        sys.exit(1)
+        raise RuntimeError(
+            f"Không bind được Syslog UDP port {actual_port}"
+        )
 
     def udp_listener():
         while True:

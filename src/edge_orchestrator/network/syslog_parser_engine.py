@@ -1,4 +1,5 @@
 import re
+from edge_orchestrator.core.event import EventType
 
 # ==============================================================================
 # BỘ BIỂU THỨC CHÍNH QUY (REGEX) PHÂN TÍCH LOG CISCO IOS CHO TẤT CẢ THIẾT BỊ
@@ -65,6 +66,7 @@ SSH_NO_MATCH_REGEX = re.compile(
     r"%SSH-\d+-NO_MATCH:\s*(?P<reason>.*)"
 )
 
+
 def parse_cisco_syslog(raw_message: str):
     """
     Hàm phân tích cú pháp Log thô từ Cisco IOS và chuyển đổi thành Event Dict chuẩn hóa.
@@ -76,7 +78,7 @@ def parse_cisco_syslog(raw_message: str):
     if hsrp_match:
         data = hsrp_match.groupdict()
         return {
-            "event_type": "HSRP_STATE_CHANGE",
+            "event_type": EventType.HSRP_STATE_CHANGE,
             "severity": "WARNING" if data['new_state'] == 'Active' else "INFO",
             "details": f"Giao diện {data['interface']} (Nhóm {data['group']}) chuyển trạng thái: {data['old_state']} -> {data['new_state']}",
             "data": data
@@ -88,7 +90,7 @@ def parse_cisco_syslog(raw_message: str):
         data = ospf_match.groupdict()
         sev = "CRITICAL" if data['new_state'] == 'DOWN' else "INFO"
         return {
-            "event_type": "OSPF_ADJACENCY_CHANGE",
+            "event_type": EventType.OSPF_ADJACENCY_CHANGE,
             "severity": sev,
             "details": f"Lân cận OSPF {data['neighbor_ip']} trên {data['interface']} chuyển từ {data['old_state']} sang {data['new_state']}",
             "data": data
@@ -99,7 +101,7 @@ def parse_cisco_syslog(raw_message: str):
     if psec_match:
         data = psec_match.groupdict()
         return {
-            "event_type": "PORT_SECURITY_VIOLATION",
+            "event_type": EventType.PORT_SECURITY_VIOLATION,
             "severity": "ALERT",
             "details": f"Vi phạm bảo mật cổng vật lý tại {data['interface']} bởi địa chỉ MAC lạ: {data['mac']}",
             "data": data
@@ -110,7 +112,7 @@ def parse_cisco_syslog(raw_message: str):
     if dai_match:
         data = dai_match.groupdict()
         return {
-            "event_type": "DAI_ARP_SPOOFING_DENY",
+            "event_type": EventType.DAI_ARP_SPOOFING_DENY,
             "severity": "EMERGENCY",
             "details": f"Tấn công ARP Spoofing bị chặn tại {data['interface']} (VLAN {data['vlan']})! IP Giả mạo: {data['src_ip']} | MAC: {data['src_mac']}",
             "data": data
@@ -121,7 +123,7 @@ def parse_cisco_syslog(raw_message: str):
     if link_match:
         data = link_match.groupdict()
         return {
-            "event_type": "INTERFACE_LINK_CHANGE",
+            "event_type": EventType.INTERFACE_LINK_CHANGE,
             "severity": "WARNING" if data['state'] == 'down' else "INFO",
             "details": f"Giao diện {data['interface']} đã chuyển trạng thái sang: {data['state'].upper()}",
             "data": data
@@ -132,40 +134,40 @@ def parse_cisco_syslog(raw_message: str):
     if lacp_match:
         data = lacp_match.groupdict()
         return {
-            "event_type": "LACP_PORT_SUSPENDED",
+            "event_type": EventType.LACP_PORT_SUSPENDED,
             "severity": "ERROR",
             "details": f"Cổng {data['interface']} bị tạm ngưng EtherChannel do: {data['reason']}",
             "data": data
         }
-        
+
     # 7. Kiểm tra sự kiện Native VLAN Mismatch
     cdp_match = CDP_MISMATCH_REGEX.search(msg)
     if cdp_match:
         data = cdp_match.groupdict()
         return {
-            "event_type": "NATIVE_VLAN_MISMATCH",
+            "event_type": EventType.NATIVE_VLAN_MISMATCH,
             "severity": "WARNING",
             "details": f"Sai lệch Native VLAN trên {data['local_int']} (VLAN {data['local_vlan']}) với {data['remote_device']} cổng {data['remote_int']} (VLAN {data['remote_vlan']})",
             "data": data
         }
-        
+
     # 8. Kiểm tra sự kiện Spanning Tree Unblock
     stp_match = STP_UNBLOCK_REGEX.search(msg)
     if stp_match:
         data = stp_match.groupdict()
         return {
-            "event_type": "STP_UNBLOCK_CONSISTENT",
+            "event_type": EventType.STP_UNBLOCK_CONSISTENT,
             "severity": "INFO",
             "details": f"Khôi phục trạng thái Spanning Tree trên {data['interface']} (VLAN {data['vlan']})",
             "data": data
         }
-        
+
     # 9. Kiểm tra sự kiện Link Flapping / Err-Disable
     err_match = ERR_DISABLE_REGEX.search(msg)
     if err_match:
         data = err_match.groupdict()
         return {
-            "event_type": "ERR_DISABLE_FLAP",
+            "event_type": EventType.ERR_DISABLE_FLAP,
             "severity": "CRITICAL",
             "details": f"Cổng {data['interface']} bị Err-Disable do: {data['reason']}",
             "data": data
@@ -176,13 +178,14 @@ def parse_cisco_syslog(raw_message: str):
     if ssh_match:
         data = ssh_match.groupdict()
         return {
-            "event_type": "SSH_KEX_NO_MATCH",
+            "event_type": EventType.SSH_KEX_NO_MATCH,
             "severity": "ERROR",
-            "details": f"Lỗi thuật toán mã hóa SSH: {data['reason'][:80]}...", # Cắt bớt nếu chuỗi quá dài
+            "details": f"Lỗi thuật toán mã hóa SSH: {data['reason'][:80]}...",
             "data": data
         }
 
-    return {"event_type": "UNKNOWN_SYS_LOG", "severity": "DEBUG", "details": msg, "data": {}}
+    return {"event_type": EventType.UNKNOWN_SYS_LOG, "severity": "DEBUG", "details": msg, "data": {}}
+
 
 # ==============================================================================
 # MÔ PHỎNG CHẠY KIỂM THỬ VỚI CÁC MẪU LOG THỰC TẾ TRONG HỆ THỐNG
