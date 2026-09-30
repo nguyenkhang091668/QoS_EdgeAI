@@ -41,7 +41,7 @@ echo -e "${GREEN}  ✓ System dependencies cài xong${NC}"
 
 # ─── BƯỚC 3: Cài PyQt5 cho Pi (cần cài từ apt, không phải pip) ──────────────
 echo -e "${YELLOW}[BƯỚC 3/9] Cài PyQt5 cho Raspberry Pi...${NC}"
-sudo apt-get install -y python3-pyqt5
+sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtsvg
 echo -e "${GREEN}  ✓ PyQt5 cài xong${NC}"
 
 # ─── BƯỚC 4: Tạo Virtual Environment ─────────────────────────────────────────
@@ -81,17 +81,14 @@ fi
 
 # ─── BƯỚC 8: Cấu hình Syslog UDP 514 không cần sudo ─────────────────────────
 echo -e "${YELLOW}[BƯỚC 8/9] Cấu hình systemd service...${NC}"
-# Trên Pi 4, dùng authbind để bind port 514 không cần sudo
-sudo apt-get install -y -qq authbind
-sudo touch /etc/authbind/byport/514
-sudo chmod 500 /etc/authbind/byport/514
-sudo chown "$INSTALL_USER:$INSTALL_GROUP" /etc/authbind/byport/514
+# Cấp riêng quyền bind UDP 514 thông qua systemd capability
 
 # Tạo systemd service để tự khởi động
 cat <<EOF | sudo tee /etc/systemd/system/datn-orchestrator.service > /dev/null
 [Unit]
 Description=DATN Edge Orchestrator — Nguyen Tiet Khang 41900966
-After=network.target tailscaled.service
+After=network-online.target tailscaled.service display-manager.service
+Wants=network-online.target
 
 [Service]
 User=${INSTALL_USER}
@@ -100,7 +97,9 @@ WorkingDirectory=${PROJECT_DIR}
 Environment="DISPLAY=:0"
 Environment="PYTHONPATH=${PROJECT_DIR}/src"
 Environment="EDGE_MODEL_PATH=${PROJECT_DIR}/src/edge_orchestrator/Edge/yolov8n_ncnn_model"
-ExecStart=/usr/bin/authbind --deep ${VENV_DIR}/bin/python -m edge_orchestrator.main --gns3 --no-sim
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStart=${VENV_DIR}/bin/python -m edge_orchestrator.main --gns3 --no-sim
 Restart=on-failure
 RestartSec=10
 
@@ -112,11 +111,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable datn-orchestrator.service
 echo -e "${GREEN}  ✓ Systemd service đã tạo và enable${NC}"
 
-# ─── BƯỚC 9: Bật Edge AI thật (SIMULATE_AI = False) ─────────────────────────
-echo -e "${YELLOW}[BƯỚC 9/9] Bật chế độ AI thật trong config.py...${NC}"
-sed -i 's/SIMULATE_AI.*=.*True/SIMULATE_AI            = False/' "$PROJECT_DIR/src/edge_orchestrator/core/config.py"
-sed -i 's/RUNNING_ON_PI4.*=.*False/RUNNING_ON_PI4         = True/' "$PROJECT_DIR/src/edge_orchestrator/core/config.py"
-echo -e "${GREEN}  ✓ config.py: SIMULATE_AI=False, RUNNING_ON_PI4=True${NC}"
+# ─── B 9ƯỚC Triền kse) ─────────────────────────
+echo -e "${YELLOW}[BƯỚC 9/9] Xác nhận chế độ triển khai thật...${NC}"
+echo -e "${GREEN}  ✓ AI, Netmiko và Syslog thật được bật bằng --gns3 --no-sim${NC}"
+echo -e "${GREEN}  ✓ Model NCNN được truyền bằng EDGE_MODEL_PATH${NC}"
 
 # ─── HOÀN TẤT ─────────────────────────────────────────────────────────────────
 echo ""
@@ -133,5 +131,5 @@ echo -e "  4. Xem log:"
 echo -e "     ${YELLOW}journalctl -u datn-orchestrator.service -f${NC}"
 echo ""
 echo -e "  Hoặc chạy thủ công:"
-echo -e "     ${YELLOW}PYTHONPATH=src .venv/bin/python -m edge_orchestrator.main --gns3 --no-sim${NC}"
+echo -e "     ${YELLOW}EDGE_MODEL_PATH=\"${PROJECT_DIR}/src/edge_orchestrator/Edge/yolov8n_ncnn_model\" PYTHONPATH=src .venv/bin/python -m edge_orchestrator.main --gns3 --no-sim${NC}"
 echo ""
