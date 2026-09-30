@@ -1,0 +1,15 @@
+# GUI và biểu đồ
+matplotlib
+numpy<2
+
+# Camera và Edge AI
+opencv-python
+ultralytics==8.4.160
+ncnn
+
+# Điều khiển thiết bị mạng
+netmiko==4.3.0
+paramiko<3.0
+
+# Web dashboard
+Flask==3.0.3

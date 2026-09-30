@@ -11,6 +11,8 @@ RED='\033[0;31m'; NC='\033[0m'; BOLD='\033[1m'
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
+INSTALL_USER="${SUDO_USER:-$(id -un)}"
+INSTALL_GROUP="$(id -gn "$INSTALL_USER")"
 
 echo ""
 echo -e "${CYAN}============================================================${NC}"
@@ -26,6 +28,7 @@ sudo apt-get upgrade -y -qq
 echo -e "${GREEN}  ✓ System updated${NC}"
 
 # ─── BƯỚC 2: Cài các dependencies hệ thống ───────────────────────────────────
+# Các dependency dành riêng cho Pi được cài qua requirement_pi.txt.
 echo -e "${YELLOW}[BƯỚC 2/9] Cài system dependencies...${NC}"
 sudo apt-get install -y -qq \
     python3-pip python3-venv python3-dev \
@@ -55,15 +58,15 @@ pip install --upgrade pip --quiet
 
 # ─── BƯỚC 5: Cài Python packages ─────────────────────────────────────────────
 echo -e "${YELLOW}[BƯỚC 5/9] Cài Python packages...${NC}"
-python -m pip install --quiet -r "$PROJECT_DIR/requirement.txt"
+python -m pip install --no-cache-dir -r "$PROJECT_DIR/requirement_pi.txt"
 
-# OpenCV is installed through the shared requirement.txt.
+# Các dependency dành riêng cho Pi được cài qua requirement_pi.txt.
 
 echo -e "${GREEN}  ✓ Python packages cài xong${NC}"
 
 # ─── BƯỚC 6: Cài YOLOv8 nano (Edge AI thật) ──────────────────────────────────
 echo -e "${YELLOW}[BƯỚC 6/9] Cài Ultralytics YOLOv8 (Edge AI thật)...${NC}"
-# Ultralytics is installed through the shared requirement.txt.
+# Ultralytics và backend NCNN được cài qua requirement_pi.txt.
 echo -e "${GREEN}  ✓ YOLOv8 cài xong${NC}"
 
 # ─── BƯỚC 7: Cài Tailscale ───────────────────────────────────────────────────
@@ -83,7 +86,7 @@ echo -e "${YELLOW}[BƯỚC 8/9] Cấu hình systemd service...${NC}"
 sudo apt-get install -y -qq authbind
 sudo touch /etc/authbind/byport/514
 sudo chmod 500 /etc/authbind/byport/514
-sudo chown pi /etc/authbind/byport/514
+sudo chown "$INSTALL_USER:$INSTALL_GROUP" /etc/authbind/byport/514
 
 # Tạo systemd service để tự khởi động
 cat <<EOF | sudo tee /etc/systemd/system/datn-orchestrator.service > /dev/null
@@ -92,10 +95,13 @@ Description=DATN Edge Orchestrator — Nguyen Tiet Khang 41900966
 After=network.target tailscaled.service
 
 [Service]
-User=pi
+User=${INSTALL_USER}
+Group=${INSTALL_GROUP}
 WorkingDirectory=${PROJECT_DIR}
-Environment=DISPLAY=:0
-ExecStart=${VENV_DIR}/bin/python ${PROJECT_DIR}/main_orchestrator.py --gns3 --no-sim
+Environment="DISPLAY=:0"
+Environment="PYTHONPATH=${PROJECT_DIR}/src"
+Environment="EDGE_MODEL_PATH=${PROJECT_DIR}/src/edge_orchestrator/Edge/yolov8n_ncnn_model"
+ExecStart=/usr/bin/authbind --deep ${VENV_DIR}/bin/python -m edge_orchestrator.main --gns3 --no-sim
 Restart=on-failure
 RestartSec=10
 
@@ -109,17 +115,17 @@ echo -e "${GREEN}  ✓ Systemd service đã tạo và enable${NC}"
 
 # ─── BƯỚC 9: Bật Edge AI thật (SIMULATE_AI = False) ─────────────────────────
 echo -e "${YELLOW}[BƯỚC 9/9] Bật chế độ AI thật trong config.py...${NC}"
-sed -i 's/SIMULATE_AI.*=.*True/SIMULATE_AI            = False/' "$PROJECT_DIR/config.py"
-sed -i 's/RUNNING_ON_PI4.*=.*False/RUNNING_ON_PI4         = True/' "$PROJECT_DIR/config.py"
+sed -i 's/SIMULATE_AI.*=.*True/SIMULATE_AI            = False/' "$PROJECT_DIR/src/edge_orchestrator/core/config.py"
+sed -i 's/RUNNING_ON_PI4.*=.*False/RUNNING_ON_PI4         = True/' "$PROJECT_DIR/src/edge_orchestrator/core/config.py"
 echo -e "${GREEN}  ✓ config.py: SIMULATE_AI=False, RUNNING_ON_PI4=True${NC}"
 
 # ─── HOÀN TẤT ─────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}============================================================${NC}"
-echo -e "${GREEN}  ✅ Raspberry Pi 4 SẴN SÀNG!${NC}"
+echo -e "${GREEN}   Raspberry Pi 4 SẴN SÀNG!${NC}"
 echo -e "${GREEN}============================================================${NC}"
 echo ""
-echo -e "📋 BƯỚC TIẾP THEO:"
+echo -e " BƯỚC TIẾP THEO:"
 echo -e "  1. Kết nối Tailscale: ${YELLOW}sudo tailscale up${NC}"
 echo -e "  2. Cắm màn hình LCD 7-inch vào HDMI/DSI"
 echo -e "  3. Khởi động service:"
@@ -128,5 +134,5 @@ echo -e "  4. Xem log:"
 echo -e "     ${YELLOW}journalctl -u datn-orchestrator.service -f${NC}"
 echo ""
 echo -e "  Hoặc chạy thủ công:"
-echo -e "     ${YELLOW}source .venv/bin/activate && python main_orchestrator.py --gns3 --no-sim${NC}"
+echo -e "     ${YELLOW}PYTHONPATH=src .venv/bin/python -m edge_orchestrator.main --gns3 --no-sim${NC}"
 echo ""

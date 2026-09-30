@@ -37,13 +37,15 @@ def class_scores(output, classes):
     # Fail closed: explicit class count avoids mistaking box/NMS fields for scores.
     channels = 4 + classes
     if output.ndim != 3 or output.shape[0] != 1:
-        raise ValueError(f'Expected raw YOLOv8 detection output, got {output.shape}')
+        raise ValueError(
+            f'Expected raw YOLOv8 detection output, got {output.shape}')
     if output.shape[1] == channels and output.shape[2] != channels:
         scores = output[0, 4:, :]
     elif output.shape[2] == channels and output.shape[1] != channels:
         scores = output[0, :, 4:].T
     else:
-        raise ValueError(f'Output {output.shape} incompatible with {classes} classes; raw detection only')
+        raise ValueError(
+            f'Output {output.shape} incompatible with {classes} classes; raw detection only')
     if scores.size == 0 or not np.isfinite(scores).all() or scores.min() < -0.01 or scores.max() > 1.01:
         raise ValueError('Expected finite class probabilities in [0,1]')
     return scores
@@ -69,32 +71,54 @@ class Detector:
         if classes < 1 or threads < 1:
             raise ValueError('classes and threads must be positive')
         path = Path(model)
-        if not path.is_file():
+        if not path.exists():
             raise FileNotFoundError(f'Model not found: {path}')
         self.confidence = confidence
         self.classes = classes
-        self.backend = path.suffix.lower()
+        if path.is_dir():
+            self.backend = '.ncnn'
+            required_files = (
+                path / "model.ncnn.param",
+                path / "model.ncnn.bin",
+                path / "metadata.yaml",
+            )
+            missing_files = [
+                str(file_path)
+                for file_path in required_files
+                if not file_path.is_file()
+            ]
+            if missing_files:
+                raise FileNotFoundError(
+                    f"Missing NCNN files: {', '.join(missing_files)}")
+        else:
+            self.backend = path.suffix.lower()
+
         if self.backend == '.tflite':
             from ai_edge_litert.interpreter import Interpreter
             self.model = Interpreter(model_path=str(path), num_threads=threads)
             self.model.allocate_tensors()
             inputs, outputs = self.model.get_input_details(), self.model.get_output_details()
             if len(inputs) != 1 or len(outputs) != 1:
-                raise ValueError('Expected one input and one raw detection output')
+                raise ValueError(
+                    'Expected one input and one raw detection output')
             self.input, self.output = inputs[0], outputs[0]
             shape = tuple(self.input['shape'])
             if len(shape) != 4 or shape[0] != 1 or shape[3] != 3 or min(shape) <= 0:
-                raise ValueError(f'Expected static NHWC [1,H,W,3], got {shape}')
+                raise ValueError(
+                    f'Expected static NHWC [1,H,W,3], got {shape}')
             self.height, self.width = int(shape[1]), int(shape[2])
             # Validate layout without invoking inference.
             class_scores(np.zeros(self.output['shape'], np.float32), classes)
-        elif self.backend == '.pt':
+        elif self.backend in ('.pt', '.ncnn'):
             from ultralytics import YOLO
-            self.model = YOLO(str(path), task='detect')
+            self.model = YOLO(
+                str(path),
+                task='detect'
+            )
             if self.model.task != 'detect':
                 raise ValueError('Detection model required')
         else:
-            raise ValueError('Model must be .pt or .tflite')
+            raise ValueError('Model must be .pt or .tflite or .ncnn')
 
     def infer(self, roi):
         start = time.perf_counter()
@@ -103,13 +127,21 @@ class Detector:
             tensor = encode_input(rgb, self.input)[None, ...]
             self.model.set_tensor(self.input['index'], tensor)
             self.model.invoke()
-            output = decode_output(self.model.get_tensor(self.output['index']), self.output)
+            output = decode_output(self.model.get_tensor(
+                self.output['index']), self.output)
             scores = class_scores(output, self.classes)
             class_id, _ = np.unravel_index(np.argmax(scores), scores.shape)
             score = float(scores.max())
             label = f'class_{class_id}'
         else:
-            prediction = self.model.predict(roi, imgsz=320, conf=.001, device='cpu', verbose=False)[0]
+            prediction = self.model.predict(
+                roi,
+                imgsz=320,
+                conf=self.confidence,
+                classes=[0],
+                device="cpu",
+                verbose=False
+            )[0]
             boxes = prediction.boxes
             if boxes is None or len(boxes) == 0:
                 score, class_id, label = 0., -1, 'none'
@@ -119,5 +151,6 @@ class Detector:
                 class_id = int(boxes.cls[index].item())
                 label = prediction.names[class_id]
         return dict(detected=score >= self.confidence, score=score, class_id=int(class_id),
-                    label=label, inference_ms=round((time.perf_counter()-start)*1000, 2),
+                    label=label, inference_ms=round(
+                        (time.perf_counter()-start)*1000, 2),
                     backend=self.backend)

@@ -57,7 +57,10 @@ RTSP_FALLBACK_SIMULATE = True   # True = Mô phỏng camera khi không có GNS3 
 SIMULATE_AI = True   # True = Mô phỏng (MacBook không có Pi camera)
 # False = Dùng YOLOv8 thật (khi chuyển sang Pi 4)
 AI_PERSON_DETECT_PROB = 0.25   # Xác suất giả lập phát hiện người (25%)
-
+AI_CONFIDENCE = 0.5
+AI_OBSERVATION_TTL_SEC = 3.0
+EDGE_MODEL_PATH = os.environ.get("EDGE_MODEL_PATH")
+CAMERA_INDEX = 0
 # ==============================================================================
 # [BƯỚC 6] SYSLOG SERVER & TELEMETRY (Tshark)
 # ==============================================================================
@@ -79,8 +82,8 @@ SIMULATE_TELEMETRY = False
 # ==============================================================================
 # [BƯỚC 7] DEBOUNCE LOGIC
 # ==============================================================================
-ALERT_TRIGGER_SECONDS = 3    # Phát hiện người ≥ 3 giây → ALERT
-NORMAL_TRIGGER_SECONDS = 10   # Không phát hiện ≥ 10 giây → NORMAL
+ALERT_TRIGGER_SEC = 3    # Phát hiện người ≥ 3 giây → ALERT
+RECOVER_TRIGGER_SEC = 10   # Không phát hiện ≥ 10 giây → NORMAL
 
 # ==============================================================================
 # [BƯỚC 8] BANDWIDTH QoS - LÝ THUYẾT & HỌC THUẬT
