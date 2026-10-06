@@ -55,5 +55,5 @@ urllib3==2.8.0
 scapy
 rich
 
-cryptography==50.0.1
+cryptography>=41.0.5,<45
 pysnmp==7.1.30
