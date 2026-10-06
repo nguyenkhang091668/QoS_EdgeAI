@@ -1,37 +1,85 @@
-from edge_orchestrator.network.qos_telemetry import QoSTelemetryWorker
-from edge_orchestrator.network.bandwidth_store import BandwidthStore
-from edge_orchestrator.network.bandwidth_types import CollectorStatus
-from edge_orchestrator.network.pysnmp_client import PySnmpV3Client
-from edge_orchestrator.network.snmp_bandwidth import CiscoBandwidthCollector
-from edge_orchestrator.network.snmp_bandwidth_worker import CiscoBandwidthWorker
-from edge_orchestrator.network.network_controller import NetworkController
-from edge_orchestrator.network.syslog_receiver import syslog_event_queue
-from edge_orchestrator.core.decision_engine import QoSDecisionEngine, AIDecisionEngine
-from edge_orchestrator.core import config
-import numpy as np
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-import matplotlib.pyplot as plt
 import sys
 import time
 import random
 import threading
 import queue
 from datetime import datetime
-from edge_orchestrator.core.event import EventType
-from edge_orchestrator.gui.ai_camera_worker import AICameraWorker
 from pathlib import Path
 
-from PyQt5.QtWidgets import (
-    QWidget, QGridLayout, QLabel, QTextEdit,
-    QGroupBox, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy
-)
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject
-from PyQt5.QtGui import QFont, QImage, QPixmap, QColor, QPalette
+import numpy as np
+
 import matplotlib
+
 matplotlib.use("Qt5Agg")
+
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import (
+    FigureCanvasQTAgg as FigureCanvas,
+)
+
+from PyQt5.QtWidgets import (
+    QWidget,
+    QGridLayout,
+    QLabel,
+    QTextEdit,
+    QGroupBox,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QSizePolicy,
+)
+from PyQt5.QtCore import (
+    QTimer,
+    Qt,
+    pyqtSignal,
+    QObject,
+)
+from PyQt5.QtGui import (
+    QFont,
+    QImage,
+    QPixmap,
+    QColor,
+    QPalette,
+)
+
+from edge_orchestrator.core import config
+from edge_orchestrator.core.decision_engine import (
+    QoSDecisionEngine,
+    AIDecisionEngine,
+)
+from edge_orchestrator.core.event import EventType
+from edge_orchestrator.gui.ai_camera_worker import (
+    AICameraWorker,
+)
+from edge_orchestrator.network.bandwidth_store import (
+    BandwidthStore,
+)
+from edge_orchestrator.network.bandwidth_types import (
+    CollectorStatus,
+)
+from edge_orchestrator.network.network_controller import (
+    NetworkController,
+)
+from edge_orchestrator.network.pysnmp_client import (
+    PySnmpV3Client,
+)
+from edge_orchestrator.network.qos_telemetry import (
+    QoSTelemetryWorker,
+)
+from edge_orchestrator.network.snmp_bandwidth import (
+    CiscoBandwidthCollector,
+)
+from edge_orchestrator.network.snmp_bandwidth_worker import (
+    CiscoBandwidthWorker,
+)
+from edge_orchestrator.network.syslog_receiver import (
+    syslog_event_queue,
+)
 try:
     import cv2
+
     CV2_OK = True
+
 except ImportError:
     CV2_OK = False
 
