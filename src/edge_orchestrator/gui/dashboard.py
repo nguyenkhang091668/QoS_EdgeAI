@@ -61,7 +61,6 @@ from matplotlib.backends.backend_qt5agg import (
 import matplotlib.pyplot as plt
 import sys
 import time
-import random
 import threading
 import queue
 from datetime import datetime
@@ -207,6 +206,7 @@ class MainDashboard(QWidget):
             self.log_console(
                 "SIMULATE MODE: AI → Disabled"
             )
+        self._telemetry_state_cache = {}
 
     def _init_ui(self):
         main_layout = QGridLayout(self)
@@ -364,7 +364,7 @@ class MainDashboard(QWidget):
                 auth_key=config.SNMP_AUTH_KEY,
                 priv_key=config.SNMP_PRIV_KEY,
                 port=config.SNMP_PORT,
-                timeout_sec=config.SNMP_TIMEOUT,
+                timeout_sec=config.SNMP_TIMEOUT_SEC,
                 retries=config.SNMP_RETRIES,
             )
             collector = CiscoBandwidthCollector(
@@ -383,6 +383,12 @@ class MainDashboard(QWidget):
                         config.SNMP_DEVICES
                     ),
                 )
+            )
+            self.snmp_bandwidth_worker.samples_signal.connect(
+                self._on_snmp_bandwidth_samples
+            )
+            self.snmp_bandwidth_worker.error_signal.connect(
+                self._on_snmp_bandwidth_error
             )
             self.snmp_bandwidth_worker.start()
             self.log_console(
@@ -457,10 +463,6 @@ class MainDashboard(QWidget):
                 config,
                 "AI_PERSON_DETECT_PROB",
                 0.25,
-            )
-
-            person_detected = (
-                random.random() < probability
             )
 
             self._update_cam_frame(
@@ -619,35 +621,93 @@ class MainDashboard(QWidget):
         )
 
     def _update_telemetry(self, metrics):
-        """Nhận dữ liệu từ tshark (chạy mỗi 2s) và cập nhật đồ thị Khung 1"""
+        """Cập nhật telemetry RTP và chỉ log khi trạng thái thay đổi."""
+
         total_cam_bitrate = 0.0
+        valid_qos_metrics = []
+
         for metric in metrics:
+            camera_id = str(metric["ID"])
             port = str(metric["Port"])
+            bitrate = float(metric["Bitrate_Mbps"])
+            loss = float(metric["Loss_Percent"])
+            jitter = float(metric["Jitter_ms"])
+
             self.telemetry_data[port] = {
-                "bitrate": metric["Bitrate_Mbps"],
-                "loss": metric["Loss_Percent"],
-                "jitter": metric["Jitter_ms"]
+                "bitrate": bitrate,
+                "loss": loss,
+                "jitter": jitter,
             }
-            total_cam_bitrate += metric["Bitrate_Mbps"]
 
-            # Cảnh báo QoS nếu mạng kém
-            if metric["Loss_Percent"] > 5.0 or metric["Jitter_ms"] > 30.0:
-                self.log_console(
-                    f"[TELEMETRY]  CAM {metric['ID']} ({port}) mạng kém: Loss={metric['Loss_Percent']}%, Jitter={metric['Jitter_ms']}ms", alert=True)
+            total_cam_bitrate += bitrate
 
-            # Log periodic nhẹ cho console đỡ trôi
-            elif random.random() < 0.1:  # In 10% sample để show-off telemetry đang chạy
-                self.log_console(
-                    f"[TELEMETRY] CAM {metric['ID']} (Port {port}): {metric['Bitrate_Mbps']} Mbps | Loss: {metric['Loss_Percent']}% | Jitter: {metric['Jitter_ms']}ms")
+            if bitrate <= 0:
+                telemetry_state = "NO_STREAM"
+
+            elif (
+                loss > config.QOS_THRESHOLD_LOSS
+                or jitter > config.QOS_THRESHOLD_JITTER
+            ):
+                telemetry_state = "DEGRADED"
+
+            else:
+                telemetry_state = "STREAMING"
+
+            previous_state = (
+                self._telemetry_state_cache.get(
+                    camera_id
+                )
+            )
+
+            self._telemetry_state_cache[
+                camera_id
+            ] = telemetry_state
+
+            # Chỉ ghi log khi trạng thái thay đổi.
+            if telemetry_state != previous_state:
+                if telemetry_state == "NO_STREAM":
+                    self.log_console(
+                        f"[TELEMETRY] {camera_id} "
+                        f"(UDP/{port}): NO_STREAM",
+                        alert=True,
+                    )
+
+                elif telemetry_state == "DEGRADED":
+                    self.log_console(
+                        f"[TELEMETRY] {camera_id} "
+                        f"(UDP/{port}): DEGRADED | "
+                        f"Bitrate={bitrate:.3f} Mbps | "
+                        f"Loss={loss:.2f}% | "
+                        f"Jitter={jitter:.2f} ms",
+                        alert=True,
+                    )
+
+                else:
+                    self.log_console(
+                        f"[TELEMETRY] {camera_id} "
+                        f"(UDP/{port}): STREAMING | "
+                        f"Bitrate={bitrate:.3f} Mbps"
+                    )
+
+            # NO_STREAM là trạng thái nguồn không có luồng,
+            # không được xem là packet loss để kích hoạt QoS.
+            if telemetry_state != "NO_STREAM":
+                valid_qos_metrics.append(metric)
+
         self._latest_cam_bitrate = total_cam_bitrate
 
         network_state_change = self.qos_engine.update(
-            metrics,
-            log_callback=lambda text, alert=False: self.log_console(
-                text, alert),
+            valid_qos_metrics,
+            log_callback=(
+                lambda text, alert=False:
+                self.log_console(text, alert)
+            ),
         )
+
         if network_state_change is not None:
-            self._on_network_state_change(network_state_change)
+            self._on_network_state_change(
+                network_state_change
+            )
 
     def _recalculate_target_policy(self):
         if self._ai_state == "ALERT":
@@ -890,6 +950,7 @@ class MainDashboard(QWidget):
         event.accept()
 
     def _start_ai_camera_worker(self):
+        usb_camera_config = config.LOCAL_CAMERAS["CAM04"]
         configured_model = getattr(
             config,
             "EDGE_MODEL_PATH",
@@ -911,21 +972,20 @@ class MainDashboard(QWidget):
             )
             return
         self.ai_camera_worker = AICameraWorker(
-            camera_index=getattr(
-                config,
-                "CAMERA_INDEX",
-                0,
-            ),
-            model_path=str(
-                model_path
-            ),
-            confidence=getattr(
-                config,
-                "AI_CONFIDENCE",
-                0.5,
-            ),
-
-        )
+            camera_index=usb_camera_config[
+                    "device"
+                ],
+                model_path=str(model_path),
+                confidence=getattr(
+                    config,
+                    "AI_CONFIDENCE",
+                    0.5,
+                ),
+                v4l2=usb_camera_config.get(
+                    "v4l2",
+                    True,
+                ),
+            )
 
         self.ai_camera_worker.frame_signal.connect(
             self._on_real_camera_frame

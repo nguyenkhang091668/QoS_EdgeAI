@@ -18,6 +18,7 @@ class AICameraWorker(QThread):
         camera_index=0,
         model_path=None,
         confidence=0.5,
+        v4l2=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -25,6 +26,7 @@ class AICameraWorker(QThread):
         self.camera_index = camera_index
         self.model_path = model_path
         self.confidence = confidence
+        self.v4l2 = bool(v4l2)
         self._running = False
 
     def run(self):
@@ -36,6 +38,7 @@ class AICameraWorker(QThread):
                 model_path=self.model_path,
                 camera_index=self.camera_index,
                 confidence=self.confidence,
+                v4l2=self.v4l2,
             )
 
             camera.open()

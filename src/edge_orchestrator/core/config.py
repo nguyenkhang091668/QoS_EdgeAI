@@ -172,7 +172,11 @@ LOCAL_CAMERAS = {
     },
     "CAM04": {
         "source": "usb",
-        "device": "/dev/video0",
+        "device": os.environ.get(
+            "USB_CAMERA_DEVICE",
+            "/dev/video0",
+        ),
+        "v4l2": True,
         "label": "CAM04 USB-CAMERA",
     },
 }
