@@ -104,8 +104,14 @@ class CiscoBandwidthCollectorTests(
         self.assertIsNone(sample.value_mbps)
 
     def test_second_poll_calculates_rx(self):
-        self.poll()
-        self.advance(2)
+        first = self.poll()
+
+        self.assertEqual(
+            first.status,
+            CollectorStatus.WARMING_UP,
+        )
+
+        self.advance(6)
 
         self.client.reading = InterfaceCounters(
             admin_status=1,
@@ -116,23 +122,28 @@ class CiscoBandwidthCollectorTests(
 
         sample = self.poll()
 
-        # 1000 bytes × 8 / 2 seconds / 1e6
-        self.assertAlmostEqual(
-            sample.rx_mbps,
-            0.004,
-        )
-        self.assertAlmostEqual(
-            sample.value_mbps,
-            0.004,
-        )
         self.assertEqual(
             sample.status,
             CollectorStatus.ONLINE,
         )
 
+        assert sample.rx_mbps is not None
+        assert sample.value_mbps is not None
+
+        expected_rx = (1000* 8/ 6.0/ 1_000_000)
+
+        self.assertAlmostEqual(
+            sample.rx_mbps,
+            expected_rx,
+        )
+        self.assertAlmostEqual(
+            sample.value_mbps,
+            expected_rx,
+        )
+
     def test_zero_delta_is_online_zero(self):
         self.poll()
-        self.advance(2)
+        self.advance(6)
 
         sample = self.poll()
 
@@ -149,7 +160,7 @@ class CiscoBandwidthCollectorTests(
         self,
     ):
         self.poll()
-        self.advance(2)
+        self.advance(6)
 
         self.client.reading = InterfaceCounters(
             admin_status=1,
@@ -230,11 +241,14 @@ class CiscoBandwidthCollectorTests(
             self.collector.poll_device(
                 "UNKNOWN"
             )
+
     def test_tx_direction_selects_tx_value(self):
-        self.collector.devices["R1"]["direction"] = "tx"
+        self.collector.devices["R1"][
+            "direction"
+        ] = "tx"
 
         self.poll()
-        self.advance(2)
+        self.advance(6)
 
         self.client.reading = InterfaceCounters(
             admin_status=1,
@@ -245,28 +259,35 @@ class CiscoBandwidthCollectorTests(
 
         sample = self.poll()
 
-        # RX delta: 1000 bytes -> 0.004 Mbps
-        self.assertAlmostEqual(
-            sample.rx_mbps,
-            0.004,
-        )
-
-        # TX delta: 2000 bytes -> 0.008 Mbps
-        self.assertAlmostEqual(
-            sample.tx_mbps,
-            0.008,
-        )
-
-        # direction=tx nên giá trị hiển thị lấy TX
-        self.assertAlmostEqual(
-            sample.value_mbps,
-            0.008,
-        )
-
         self.assertEqual(
             sample.status,
             CollectorStatus.ONLINE,
         )
+
+        assert sample.rx_mbps is not None
+        assert sample.tx_mbps is not None
+        assert sample.value_mbps is not None
+
+        expected_rx = (1000* 8/ 6.0/ 1_000_000)
+
+        expected_tx = (2000* 8/ 6.0/ 1_000_000)
+
+        self.assertAlmostEqual(
+            sample.rx_mbps,
+            expected_rx,
+        )
+
+        self.assertAlmostEqual(
+            sample.tx_mbps,
+            expected_tx,
+        )
+
+        # direction="tx" nên value_mbps lấy TX.
+        self.assertAlmostEqual(
+            sample.value_mbps,
+            expected_tx,
+        )
+
     def test_devices_have_independent_baselines(self):
         devices = {
             "R1": {
@@ -300,7 +321,7 @@ class CiscoBandwidthCollectorTests(
             CollectorStatus.WARMING_UP,
         )
 
-        self.advance(2)
+        self.advance(6)
 
         self.client.reading = InterfaceCounters(
             admin_status=1,
@@ -326,6 +347,99 @@ class CiscoBandwidthCollectorTests(
 
         self.assertIsNone(
             first_r2.value_mbps,
+        )
+
+    def test_batched_counter_is_smoothed_over_window(
+        self,
+    ):
+        first = self.poll()
+
+        self.assertEqual(
+            first.status,
+            CollectorStatus.WARMING_UP,
+        )
+
+        self.advance(2)
+        second = self.poll()
+
+        self.assertEqual(
+            second.status,
+            CollectorStatus.WARMING_UP,
+        )
+
+        self.advance(2)
+        third = self.poll()
+
+        self.assertEqual(
+            third.status,
+            CollectorStatus.WARMING_UP,
+        )
+
+        # SNMP agent dồn 1,000,000 byte và cập nhật
+        # counter sau 6 giây.
+        self.advance(2)
+        self.client.reading = InterfaceCounters(
+            admin_status=1,
+            oper_status=1,
+            in_octets=1_001_000,
+            out_octets=2000,
+        )
+
+        fourth = self.poll()
+
+        self.assertEqual(
+            fourth.status,
+            CollectorStatus.ONLINE,
+        )
+
+        assert fourth.rx_mbps is not None
+
+        expected_rx = (
+            1_000_000
+            * 8
+            / 6.0
+            / 1_000_000
+        )
+
+        self.assertAlmostEqual(
+            fourth.rx_mbps,
+            expected_rx,
+        )
+
+        # Counter chưa cập nhật thêm, nhưng cửa sổ
+        # 6 giây vẫn chứa lượng byte vừa đo được.
+        self.advance(2)
+        fifth = self.poll()
+
+        assert fifth.rx_mbps is not None
+
+        self.assertAlmostEqual(
+            fifth.rx_mbps,
+            expected_rx,
+        )
+
+        self.advance(2)
+        sixth = self.poll()
+
+        assert sixth.rx_mbps is not None
+
+        self.assertAlmostEqual(
+            sixth.rx_mbps,
+            expected_rx,
+        )
+
+        # Sau đủ 6 giây hoàn toàn không có byte mới,
+        # collector mới trả về 0 Mbps.
+        self.advance(2)
+        seventh = self.poll()
+
+        self.assertEqual(
+            seventh.status,
+            CollectorStatus.ONLINE,
+        )
+        self.assertEqual(
+            seventh.rx_mbps,
+            0.0,
         )
 
 if __name__ == "__main__":

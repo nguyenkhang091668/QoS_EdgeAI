@@ -1,7 +1,8 @@
 import threading
 import time
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
 from edge_orchestrator.network.bandwidth_types import (
@@ -42,12 +43,19 @@ class SnmpClientProtocol(Protocol):
         """Trả về InterfaceCounters."""
 
 
+@dataclass(frozen=True)
+class CounterObservation:
+    in_octets: int
+    out_octets: int
+    monotonic_at: float
+
+
 @dataclass
 class DeviceCounterState:
     if_index: Optional[int] = None
-    in_octets: Optional[int] = None
-    out_octets: Optional[int] = None
-    monotonic_at: Optional[float] = None
+    observations: deque[
+        CounterObservation
+    ] = field(default_factory=deque)
     failure_count: int = 0
 
 
@@ -59,6 +67,7 @@ class CiscoBandwidthCollector:
         devices,
         snmp_client,
         offline_failures=3,
+        rate_window_sec=6.0,
         monotonic_clock=time.monotonic,
         wall_clock=time.time,
     ):
@@ -70,6 +79,11 @@ class CiscoBandwidthCollector:
                 "offline_failures must be positive"
             )
 
+        if rate_window_sec <= 0:
+            raise ValueError(
+                "rate_window_sec must be positive"
+            )
+
         self.devices = {
             source_id: dict(device_config)
             for source_id, device_config
@@ -79,6 +93,9 @@ class CiscoBandwidthCollector:
         self.snmp_client = snmp_client
         self.offline_failures = int(
             offline_failures
+        )
+        self.rate_window_sec = float(
+            rate_window_sec
         )
         self._monotonic_clock = monotonic_clock
         self._wall_clock = wall_clock
@@ -211,16 +228,14 @@ class CiscoBandwidthCollector:
         )
         now_wall = float(self._wall_clock())
 
-        if (
-            state.in_octets is None
-            or state.out_octets is None
-            or state.monotonic_at is None
-        ):
-            self._save_baseline(
-                state,
-                counters,
-                now_monotonic,
-            )
+        observation = CounterObservation(
+            in_octets=counters.in_octets,
+            out_octets=counters.out_octets,
+            monotonic_at=now_monotonic,
+        )
+
+        if not state.observations:
+            state.observations.append(observation)
 
             return self._unavailable(
                 source_id,
@@ -229,53 +244,92 @@ class CiscoBandwidthCollector:
                 None,
                 sampled_at=now_wall,
                 extra_details={
-                    "if_index":
-                        state.if_index,
+                    "if_index": state.if_index,
+                    "rate_window_sec":
+                        self.rate_window_sec,
                 },
             )
 
-        elapsed = (
-            now_monotonic
-            - state.monotonic_at
+        previous = state.observations[-1]
+
+        counter_reset = (
+            observation.in_octets
+            < previous.in_octets
+            or observation.out_octets
+            < previous.out_octets
         )
 
+        invalid_time = (
+            observation.monotonic_at
+            <= previous.monotonic_at
+        )
+
+        if counter_reset or invalid_time:
+            self._reset_baseline(state)
+            state.observations.append(observation)
+
+            return self._unavailable(
+                source_id,
+                config,
+                CollectorStatus.WARMING_UP,
+                None,
+                sampled_at=now_wall,
+                extra_details={
+                    "if_index": state.if_index,
+                    "counter_reset": counter_reset,
+                    "rate_window_sec":
+                        self.rate_window_sec,
+                },
+            )
+
+        state.observations.append(observation)
+
+        cutoff = (
+            now_monotonic
+            - self.rate_window_sec
+        )
+
+        # Giữ lại observation gần nhất nhưng không
+        # mới hơn mốc cutoff. Nó là baseline cho
+        # cửa sổ đo hiện tại.
+        while (
+            len(state.observations) > 1
+            and state.observations[1].monotonic_at
+            <= cutoff
+        ):
+            state.observations.popleft()
+
+        baseline = state.observations[0]
+
+        elapsed = (
+            observation.monotonic_at
+            - baseline.monotonic_at
+        )
+
+        if elapsed < self.rate_window_sec:
+            return self._unavailable(
+                source_id,
+                config,
+                CollectorStatus.WARMING_UP,
+                None,
+                sampled_at=now_wall,
+                extra_details={
+                    "if_index": state.if_index,
+                    "elapsed_sec": elapsed,
+                    "rate_window_sec":
+                        self.rate_window_sec,
+                },
+            )
+
         delta_in = (
-            counters.in_octets
-            - state.in_octets
+            observation.in_octets
+            - baseline.in_octets
         )
 
         delta_out = (
-            counters.out_octets
-            - state.out_octets
+            observation.out_octets
+            - baseline.out_octets
         )
-
-        # Counter giảm khi thiết bị reboot/reset hoặc
-        # interface/ifIndex bị khởi tạo lại.
-        if (
-            elapsed <= 0
-            or delta_in < 0
-            or delta_out < 0
-        ):
-            self._save_baseline(
-                state,
-                counters,
-                now_monotonic,
-            )
-
-            return self._unavailable(
-                source_id,
-                config,
-                CollectorStatus.WARMING_UP,
-                None,
-                sampled_at=now_wall,
-                extra_details={
-                    "if_index":
-                        state.if_index,
-                    "counter_reset":
-                        delta_in < 0
-                        or delta_out < 0,
-                },
-            )
 
         rx_mbps = (
             delta_in
@@ -290,15 +344,7 @@ class CiscoBandwidthCollector:
             / elapsed
             / 1_000_000
         )
-
-        self._save_baseline(
-            state,
-            counters,
-            now_monotonic,
-        )
-
         direction = config["direction"]
-
         if direction == "rx":
             display_value = rx_mbps
         else:
@@ -315,8 +361,9 @@ class CiscoBandwidthCollector:
             details=self._details(
                 config,
                 {
-                    "if_index":
-                        state.if_index,
+                    "if_index": state.if_index,
+                    "elapsed_sec": elapsed,
+                    "rate_window_sec": self.rate_window_sec,
                 },
             ),
             error=None,
@@ -403,20 +450,8 @@ class CiscoBandwidthCollector:
         return details
 
     @staticmethod
-    def _save_baseline(
-        state,
-        counters,
-        now_monotonic,
-    ):
-        state.in_octets = counters.in_octets
-        state.out_octets = counters.out_octets
-        state.monotonic_at = now_monotonic
-
-    @staticmethod
     def _reset_baseline(state):
-        state.in_octets = None
-        state.out_octets = None
-        state.monotonic_at = None
+        state.observations.clear()
 
     @staticmethod
     def _validate_counters(counters):

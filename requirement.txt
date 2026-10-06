@@ -56,4 +56,5 @@ scapy
 rich
 
 cryptography==50.0.1
+pyOpenSSL==26.4.0
 pysnmp==7.1.30

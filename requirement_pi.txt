@@ -16,4 +16,5 @@ Flask==3.0.3
 
 # Thu thập băng thông SNMPv3
 cryptography==50.0.1
+pyOpenSSL==26.4.0
 pysnmp==7.1.30
