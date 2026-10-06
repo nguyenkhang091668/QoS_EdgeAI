@@ -125,6 +125,16 @@ class CiscoBandwidthCollector:
             for source_id in self.source_ids
         ]
 
+    def close(self):
+        close_client = getattr(
+            self.snmp_client,
+            "close",
+            None,
+        )
+
+        if callable(close_client):
+            close_client()
+
     def poll_device(self, source_id):
         if source_id not in self.devices:
             raise KeyError(
