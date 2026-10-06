@@ -54,3 +54,6 @@ urllib3==2.8.0
 # Utilities used by setup scripts.
 scapy
 rich
+
+cryptography==50.0.1
+pysnmp==7.1.30

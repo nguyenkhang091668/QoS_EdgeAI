@@ -59,18 +59,53 @@ NETWORK_DEVICES = [
         "device_type": "cisco_ios",
     },
 ]
+SNMP_PORT = int(
+    os.environ.get(
+        "SNMP_PORT",
+        "161",
+    )
+)
+
+SNMP_USERNAME = os.environ.get(
+    "SNMP_USERNAME",
+    "",
+)
+
+SNMP_AUTH_KEY = os.environ.get(
+    "SNMP_AUTH_KEY",
+    "",
+)
+
+SNMP_PRIV_KEY = os.environ.get(
+    "SNMP_PRIV_KEY",
+    "",
+)
+
+SNMP_TIMEOUT_SEC = float(
+    os.environ.get(
+        "SNMP_TIMEOUT_SEC",
+        "0.8",
+    )
+)
+
+SNMP_RETRIES = int(
+    os.environ.get(
+        "SNMP_RETRIES",
+        "0",
+    )
+)
 SNMP_DEVICES = {
     "R1": {
         "host": R1_LOOPBACK_IP,
-        "interface": "GigabitEthernet0/2.10",
+        "interface": "GigabitEthernet0/2.99",
         "direction": "rx",
-        "label": "R1 VLAN10 RX",
+        "label": "R1 DSW-UPLINK RX",
     },
     "R2": {
         "host": R2_LOOPBACK_IP,
-        "interface": "GigabitEthernet0/2.10",
+        "interface": "GigabitEthernet0/2.99",
         "direction": "rx",
-        "label": "R2 VLAN10 RX",
+        "label": "R2 DSW-UPLINK RX",
     },
     "DSW1": {
         "host": DSW1_LOOPBACK_IP,

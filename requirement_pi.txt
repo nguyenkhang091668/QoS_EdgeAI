@@ -13,3 +13,7 @@ paramiko<3.0
 
 # Web dashboard
 Flask==3.0.3
+
+# Thu thập băng thông SNMPv3
+cryptography==50.0.1
+pysnmp==7.1.30
