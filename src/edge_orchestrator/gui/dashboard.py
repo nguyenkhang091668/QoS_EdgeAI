@@ -1,4 +1,9 @@
 from edge_orchestrator.network.qos_telemetry import QoSTelemetryWorker
+from edge_orchestrator.network.bandwidth_store import BandwidthStore
+from edge_orchestrator.network.bandwidth_types import CollectorStatus
+from edge_orchestrator.network.pysnmp_client import PySnmpV3Client
+from edge_orchestrator.network.snmp_bandwidth import CiscoBandwidthCollector
+from edge_orchestrator.network.snmp_bandwidth_worker import CiscoBandwidthWorker
 from edge_orchestrator.network.network_controller import NetworkController
 from edge_orchestrator.network.syslog_receiver import syslog_event_queue
 from edge_orchestrator.core.decision_engine import QoSDecisionEngine, AIDecisionEngine
@@ -30,6 +35,10 @@ try:
 except ImportError:
     CV2_OK = False
 
+BANDWIDTH_SOURCE_IDS = (
+    *config.SNMP_DEVICES.keys(),
+    *config.RTP_STREAMS.keys(),
+)
 
 # Import từ các module nội bộ của package
 
@@ -92,7 +101,14 @@ class MainDashboard(QWidget):
 
         self.setGeometry(0, 0, W, H)
         self.setStyleSheet("background-color: #0d1117; color: #ffffff;")
+        self.bandwidth_store = BandwidthStore(
+            source_ids=BANDWIDTH_SOURCE_IDS,
+            history_sec=config.BANDWIDTH_HISTORY_SEC,
+            stale_after_sec=config.BANDWIDTH_STALE_AFTER_SEC,
+        )
 
+        self.snmp_bandwidth_worker = None
+        self._bandwidth_status_cache = {}
         # Data
         self.bw_data = {"r1": [1.0]*60, "cam": [1.0]*60, "dsw": [1.0]*60}
         self.bw_gen = BandwidthGenerator()
@@ -131,9 +147,18 @@ class MainDashboard(QWidget):
         self._connect_signals()
         self._start_timers()
 
+        if not self.simulate_netmiko:
+            self._star_snmp_bandwidth_worker()
+        else:
+            self.log_console(
+                "SIMULATE MODE: Netmiko → Disabled"
+            )
         if not self.simulate_ai:
             self._start_ai_camera_worker()
-
+        else:
+            self.log_console(
+                "SIMULATE MODE: AI → Disabled"
+            )
     def _init_ui(self):
         main_layout = QGridLayout(self)
         main_layout.setContentsMargins(8, 8, 8, 8)
@@ -282,7 +307,78 @@ class MainDashboard(QWidget):
         sim_mode = "Mô phỏng" if config.SIMULATE_TELEMETRY else "Thực tế (tshark)"
         self.log_console(
             f"[TELEMETRY]  Đang lắng nghe RTP trên utun4 (Chế độ: {sim_mode})")
-
+    def _start_snmp_bandwidth_worker(self):
+        try:
+            snmp_client = PySnmpV3Client(
+                username=config.SNMP_USERNAME,
+                auth_key=config.SNMP_AUTH_KEY,
+                priv_key=config.SNMP_PRIV_KEY,
+                port=config.SNMP_PORT,
+                timeout_sec=config.SNMP_TIMEOUT,
+                retries=config.SNMP_RETRIES,
+            )
+            collector = CiscoBandwidthCollector(
+                devices=config.SNMP_DEVICES,
+                snmp_client=snmp_client,
+                offline_failures= (config.BANDWIDTH_OFFLINE_FAILURES),
+                rate_window_sec= (config.BANDWIDTH_RATE_WINDOW_SEC)
+            )
+            self.snmp_bandwidth_worker = (
+                CiscoBandwidthWorker(
+                    collector=collector,
+                    interval_sec=(
+                        config.BANDWIDTH_POLL_INTERVAL_SEC
+                    ),
+                    max_workers=len(
+                        config.SNMP_DEVICES
+                    ),
+                )
+            )
+            self.snmp_bandwidth_worker.start()
+            self.log_console(
+                f"[SNMP] Đã khởi động băng thông Cisco: {len(config.SNMP_DEVICES)} thiết bị",
+            )
+        except Exception as e:
+            self.log_console(f"[SNMP] Lỗi khởi động: {e}", alert=True)
+    def _on_snmp_bandwidth_samples(self, samples):
+        for sample in samples:
+            try:
+                accepted = self.bandwidth_store.update(
+                    sample
+                )
+            except Exception as error:
+                self.log_console(f"[SNMP] Lỗi cập nhật mẫu: {error}", alert=True)
+                continue
+            if not accepted:
+                continue
+            current_status = sample.status
+            previous_status = (
+                self._bandwidth_status_cache.get(
+                    sample.source_id
+                )
+            )
+            self._bandwidth_status_cache[sample.source_id] = current_status
+            if current_status == previous_status:
+                continue
+            is_error = current_status in {
+                CollectorStatus.OFFLINE,
+                CollectorStatus.INTERFACE_DOWN,
+                CollectorStatus.COLLECTOR_ERROR,
+                CollectorStatus.STALE,
+            }
+            message = (
+                f"SNMP BANDWIDTD"
+                f"{sample.source_id}:"
+                f"{current_status.value}"
+            )
+            if sample.error:
+                message += f" lỗi: {sample.error}"
+            self.log_console(message, alert=is_error)
+    def _on_snmp_bandwidth_error(self, message):
+        self.log_console(
+            f"[SNMP WORKER ERROR] {message}",
+            alert=True,
+        )
     # ── TICK FUNCTIONS ────────────────────────────────────────────────────────
     def _tick_bandwidth(self):
         """Cập nhật biểu đồ băng thông mỗi giây."""
@@ -340,8 +436,9 @@ class MainDashboard(QWidget):
         self._ai_state = state
 
         if state == "ALERT":
+            self._detect_count += 1
             self.lbl_status.setText(
-                " Trạng thái AI: PERSON DETECTED → ALERT"
+                f" Trạng thái AI: PERSON DETECTED → ALERT ({self._detect_count} lần)"
             )
             self.lbl_status.setStyleSheet(
                 "color: #ff5252; padding: 6px;"
@@ -726,6 +823,16 @@ class MainDashboard(QWidget):
             self.telemetry_worker.wait(3000)
         if self.ai_camera_worker is not None:
             self.ai_camera_worker.stop()
+        if self.snmp_bandwidth_worker is not None:
+            self.snmp_bandwidth_worker.stop()
+            stopped = self.snmp_bandwidth_worker.wait(
+                5000
+            )
+            if not stopped:
+                self.log_console(
+                    "[SNMP] Worker chưa dừng trong 5 giây.",
+                    alert=True,
+                )
         event.accept()
 
     def _start_ai_camera_worker(self):

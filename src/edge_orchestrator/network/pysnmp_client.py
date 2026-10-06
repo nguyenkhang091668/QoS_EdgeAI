@@ -98,6 +98,9 @@ class PySnmpV3Client:
         # Mỗi ThreadPoolExecutor thread có event loop
         # và SnmpEngine riêng.
         self._thread_local = threading.local()
+        self._sessions_lock = threading.RLock()
+        self.sessions = []
+        self._closed = False
 
     def resolve_if_index(
         self,
@@ -196,6 +199,11 @@ class PySnmpV3Client:
             ) from error
 
     def _get_thread_session(self):
+        with self._sessions_lock:
+            if self._closed:
+                raise RuntimeError(
+                    "SNMP client is already closed"
+                )
         session = getattr(
             self._thread_local,
             "session",
@@ -218,10 +226,54 @@ class PySnmpV3Client:
                     ),
                 ),
             )
-
+            with self._sessions_lock:
+                if self._closed:
+                    session.engine.close_dispatcher()
+                    session.loop.close()
+                    raise RuntimeError(
+                        "SNMP client is already closed"
+                    )
+                self.sessions.append(session)
             self._thread_local.session = session
 
         return session
+
+    def close(self):
+        with self._sessions_lock:
+            if self._closed:
+                return
+
+            self._closed = True
+            sessions = list(self.sessions)
+            self.sessions.clear()
+
+        for session in sessions:
+            loop = session.loop
+
+            if loop.is_closed():
+                continue
+
+            # Đóng transport và hủy timer nội bộ
+            # của PySNMP.
+            session.engine.close_dispatcher()
+
+            pending = asyncio.all_tasks(loop)
+
+            for task in pending:
+                task.cancel()
+
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(
+                        *pending,
+                        return_exceptions=True,
+                    )
+                )
+
+            loop.run_until_complete(
+                loop.shutdown_asyncgens()
+            )
+            loop.close()
 
     async def _create_target(self, host):
         return await UdpTransportTarget.create(

@@ -93,6 +93,23 @@ class CiscoBandwidthWorker(QThread):
                 str(error)
             )
 
+        finally:
+            close_collector = getattr(
+                self.collector,
+                "close",
+                None,
+            )
+
+            if callable(close_collector):
+                try:
+                    close_collector()
+
+                except Exception as error:
+                    self.worker_error_signal.emit(
+                        "SNMP cleanup failed: "
+                        f"{error}"
+                    )
+
     def stop(self):
         self._stop_event.set()
         self.requestInterruption()
