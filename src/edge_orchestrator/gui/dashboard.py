@@ -1,3 +1,15 @@
+import numpy as np
+from pathlib import Path
+from datetime import datetime
+import queue
+import threading
+import random
+import time
+import sys
+from matplotlib.backends.backend_qt5agg import (
+    FigureCanvasQTAgg as FigureCanvas,
+)
+import matplotlib.pyplot as plt
 from edge_orchestrator.network.syslog_receiver import (
     syslog_event_queue,
 )
@@ -55,21 +67,10 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSizePolicy,
 )
-from matplotlib.backends.backend_qt5agg import (
-    FigureCanvasQTAgg as FigureCanvas,
-)
-import matplotlib.pyplot as plt
-import sys
-import time
-import random
-import threading
-import queue
-from datetime import datetime
-from pathlib import Path
-
-import numpy as np
-
 import matplotlib
+
+matplotlib.use("Qt5Agg")
+
 
 matplotlib.use("Qt5Agg")
 
@@ -156,6 +157,7 @@ class MainDashboard(QWidget):
         )
 
         self.snmp_bandwidth_worker = None
+        self._telemetry_state_cache = {}
         self._bandwidth_status_cache = {}
         # Data
         self.bw_data = {"r1": [1.0]*60, "cam": [1.0]*60, "dsw": [1.0]*60}
@@ -207,7 +209,6 @@ class MainDashboard(QWidget):
             self.log_console(
                 "SIMULATE MODE: AI → Disabled"
             )
-        self._telemetry_state_cache = {}
 
     def _init_ui(self):
         main_layout = QGridLayout(self)
@@ -388,7 +389,7 @@ class MainDashboard(QWidget):
             self.snmp_bandwidth_worker.samples_signal.connect(
                 self._on_snmp_bandwidth_samples
             )
-            self.snmp_bandwidth_worker.error_signal.connect(
+            self.snmp_bandwidth_worker.worker_error_signal.connect(
                 self._on_snmp_bandwidth_error
             )
             self.snmp_bandwidth_worker.start()
@@ -974,19 +975,19 @@ class MainDashboard(QWidget):
             return
         self.ai_camera_worker = AICameraWorker(
             camera_index=usb_camera_config[
-                    "device"
-                ],
-                model_path=str(model_path),
-                confidence=getattr(
-                    config,
-                    "AI_CONFIDENCE",
-                    0.5,
-                ),
-                v4l2=usb_camera_config.get(
-                    "v4l2",
-                    True,
-                ),
-            )
+                "device"
+            ],
+            model_path=str(model_path),
+            confidence=getattr(
+                config,
+                "AI_CONFIDENCE",
+                0.5,
+            ),
+            v4l2=usb_camera_config.get(
+                "v4l2",
+                True,
+            ),
+        )
 
         self.ai_camera_worker.frame_signal.connect(
             self._on_real_camera_frame
