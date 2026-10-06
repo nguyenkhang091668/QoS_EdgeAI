@@ -61,6 +61,7 @@ from matplotlib.backends.backend_qt5agg import (
 import matplotlib.pyplot as plt
 import sys
 import time
+import random
 import threading
 import queue
 from datetime import datetime
