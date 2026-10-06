@@ -1,3 +1,64 @@
+from edge_orchestrator.network.syslog_receiver import (
+    syslog_event_queue,
+)
+from edge_orchestrator.network.snmp_bandwidth_worker import (
+    CiscoBandwidthWorker,
+)
+from edge_orchestrator.network.snmp_bandwidth import (
+    CiscoBandwidthCollector,
+)
+from edge_orchestrator.network.qos_telemetry import (
+    QoSTelemetryWorker,
+)
+from edge_orchestrator.network.pysnmp_client import (
+    PySnmpV3Client,
+)
+from edge_orchestrator.network.network_controller import (
+    NetworkController,
+)
+from edge_orchestrator.network.bandwidth_types import (
+    CollectorStatus,
+)
+from edge_orchestrator.network.bandwidth_store import (
+    BandwidthStore,
+)
+from edge_orchestrator.gui.ai_camera_worker import (
+    AICameraWorker,
+)
+from edge_orchestrator.core.event import EventType
+from edge_orchestrator.core.decision_engine import (
+    QoSDecisionEngine,
+    AIDecisionEngine,
+)
+from edge_orchestrator.core import config
+from PyQt5.QtGui import (
+    QFont,
+    QImage,
+    QPixmap,
+    QColor,
+    QPalette,
+)
+from PyQt5.QtCore import (
+    QTimer,
+    Qt,
+    pyqtSignal,
+    QObject,
+)
+from PyQt5.QtWidgets import (
+    QWidget,
+    QGridLayout,
+    QLabel,
+    QTextEdit,
+    QGroupBox,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QSizePolicy,
+)
+from matplotlib.backends.backend_qt5agg import (
+    FigureCanvasQTAgg as FigureCanvas,
+)
+import matplotlib.pyplot as plt
 import sys
 import time
 import random
@@ -12,69 +73,7 @@ import matplotlib
 
 matplotlib.use("Qt5Agg")
 
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import (
-    FigureCanvasQTAgg as FigureCanvas,
-)
 
-from PyQt5.QtWidgets import (
-    QWidget,
-    QGridLayout,
-    QLabel,
-    QTextEdit,
-    QGroupBox,
-    QVBoxLayout,
-    QHBoxLayout,
-    QPushButton,
-    QSizePolicy,
-)
-from PyQt5.QtCore import (
-    QTimer,
-    Qt,
-    pyqtSignal,
-    QObject,
-)
-from PyQt5.QtGui import (
-    QFont,
-    QImage,
-    QPixmap,
-    QColor,
-    QPalette,
-)
-
-from edge_orchestrator.core import config
-from edge_orchestrator.core.decision_engine import (
-    QoSDecisionEngine,
-    AIDecisionEngine,
-)
-from edge_orchestrator.core.event import EventType
-from edge_orchestrator.gui.ai_camera_worker import (
-    AICameraWorker,
-)
-from edge_orchestrator.network.bandwidth_store import (
-    BandwidthStore,
-)
-from edge_orchestrator.network.bandwidth_types import (
-    CollectorStatus,
-)
-from edge_orchestrator.network.network_controller import (
-    NetworkController,
-)
-from edge_orchestrator.network.pysnmp_client import (
-    PySnmpV3Client,
-)
-from edge_orchestrator.network.qos_telemetry import (
-    QoSTelemetryWorker,
-)
-from edge_orchestrator.network.snmp_bandwidth import (
-    CiscoBandwidthCollector,
-)
-from edge_orchestrator.network.snmp_bandwidth_worker import (
-    CiscoBandwidthWorker,
-)
-from edge_orchestrator.network.syslog_receiver import (
-    syslog_event_queue,
-)
 try:
     import cv2
 
@@ -91,6 +90,7 @@ BANDWIDTH_SOURCE_IDS = (
 # Import từ các module nội bộ của package
 
 # ── SIGNAL BRIDGE (thread-safe GUI update) ───────────────────────────────────
+
 
 class SignalBridge(QObject):
     log_signal = pyqtSignal(str, bool)    # (text, is_alert)
@@ -196,7 +196,7 @@ class MainDashboard(QWidget):
         self._start_timers()
 
         if not self.simulate_netmiko:
-            self._star_snmp_bandwidth_worker()
+            self._start_snmp_bandwidth_worker()
         else:
             self.log_console(
                 "SIMULATE MODE: Netmiko → Disabled"
@@ -207,6 +207,7 @@ class MainDashboard(QWidget):
             self.log_console(
                 "SIMULATE MODE: AI → Disabled"
             )
+
     def _init_ui(self):
         main_layout = QGridLayout(self)
         main_layout.setContentsMargins(8, 8, 8, 8)
@@ -355,6 +356,7 @@ class MainDashboard(QWidget):
         sim_mode = "Mô phỏng" if config.SIMULATE_TELEMETRY else "Thực tế (tshark)"
         self.log_console(
             f"[TELEMETRY]  Đang lắng nghe RTP trên utun4 (Chế độ: {sim_mode})")
+
     def _start_snmp_bandwidth_worker(self):
         try:
             snmp_client = PySnmpV3Client(
@@ -368,8 +370,8 @@ class MainDashboard(QWidget):
             collector = CiscoBandwidthCollector(
                 devices=config.SNMP_DEVICES,
                 snmp_client=snmp_client,
-                offline_failures= (config.BANDWIDTH_OFFLINE_FAILURES),
-                rate_window_sec= (config.BANDWIDTH_RATE_WINDOW_SEC)
+                offline_failures=(config.BANDWIDTH_OFFLINE_FAILURES),
+                rate_window_sec=(config.BANDWIDTH_RATE_WINDOW_SEC)
             )
             self.snmp_bandwidth_worker = (
                 CiscoBandwidthWorker(
@@ -388,6 +390,7 @@ class MainDashboard(QWidget):
             )
         except Exception as e:
             self.log_console(f"[SNMP] Lỗi khởi động: {e}", alert=True)
+
     def _on_snmp_bandwidth_samples(self, samples):
         for sample in samples:
             try:
@@ -395,7 +398,8 @@ class MainDashboard(QWidget):
                     sample
                 )
             except Exception as error:
-                self.log_console(f"[SNMP] Lỗi cập nhật mẫu: {error}", alert=True)
+                self.log_console(
+                    f"[SNMP] Lỗi cập nhật mẫu: {error}", alert=True)
                 continue
             if not accepted:
                 continue
@@ -422,12 +426,14 @@ class MainDashboard(QWidget):
             if sample.error:
                 message += f" lỗi: {sample.error}"
             self.log_console(message, alert=is_error)
+
     def _on_snmp_bandwidth_error(self, message):
         self.log_console(
             f"[SNMP WORKER ERROR] {message}",
             alert=True,
         )
     # ── TICK FUNCTIONS ────────────────────────────────────────────────────────
+
     def _tick_bandwidth(self):
         """Cập nhật biểu đồ băng thông mỗi giây."""
         sample = self.bw_gen.get_sample()
