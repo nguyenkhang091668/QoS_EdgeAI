@@ -11,8 +11,17 @@ import os
 # [BƯỚC 1] ĐIỀN IP TAILSCALE THỰC TẾ CỦA BẠN VÀO ĐÂY
 # Lệnh kiểm tra: tailscale status
 # ==============================================================================
-TAILSCALE_MACBOOK_IP = "100.108.25.63"    # IP Tailscale MacBook (thay Pi 4)
-TAILSCALE_GNS3_IP = "100.106.252.93"    # IP Tailscale GNS3 Server Ubuntu
+TAILSCALE_IP_PI4 = "100.103.159.73"
+TAILSCALE_MACBOOK_IP = TAILSCALE_IP_PI4
+TAILSCALE_GNS3_IP = "100.106.252.93"
+RTP_CAPTURE_INTERFACE = os.environ.get(
+    "RTP_CAPTURE_INTERFACE",
+    "tailscale0",
+)
+BANDWIDTH_POLL_INTERVAL_SEC = 2.0
+BANDWIDTH_STALE_AFTER_SEC = 6.0
+BANDWIDTH_HISTORY_SEC = 60
+BANDWIDTH_OFFLINE_FAILURES = 3
 
 # ==============================================================================
 # [BƯỚC 2] IP THIẾT BỊ MẠNG TRONG GNS3 (Loopback & VLAN99)
@@ -23,14 +32,100 @@ DSW1_LOOPBACK_IP = "10.255.255.11"   # Distribution Switch DSW1 Loopback 0
 DSW2_LOOPBACK_IP = "10.255.255.12"   # Distribution Switch DSW2 Loopback 0
 ASW_VLAN99_IP = "192.168.99.100"  # Access Switch VLAN 99 Management IP
 
-# Danh sách tất cả thiết bị Netmiko SSH
 NETWORK_DEVICES = [
-    {"name": "R1",   "ip": R1_LOOPBACK_IP,   "device_type": "cisco_ios"},
-    {"name": "R2",   "ip": R2_LOOPBACK_IP,   "device_type": "cisco_ios"},
-    {"name": "DSW1", "ip": DSW1_LOOPBACK_IP, "device_type": "cisco_ios"},
-    {"name": "DSW2", "ip": DSW2_LOOPBACK_IP, "device_type": "cisco_ios"},
-    {"name": "ASW",  "ip": ASW_VLAN99_IP,    "device_type": "cisco_ios"},
+    {
+        "name": "R1",
+        "ip": R1_LOOPBACK_IP,
+        "device_type": "cisco_ios",
+    },
+    {
+        "name": "R2",
+        "ip": R2_LOOPBACK_IP,
+        "device_type": "cisco_ios",
+    },
+    {
+        "name": "DSW1",
+        "ip": DSW1_LOOPBACK_IP,
+        "device_type": "cisco_ios",
+    },
+    {
+        "name": "DSW2",
+        "ip": DSW2_LOOPBACK_IP,
+        "device_type": "cisco_ios",
+    },
+    {
+        "name": "ASW",
+        "ip": ASW_VLAN99_IP,
+        "device_type": "cisco_ios",
+    },
 ]
+SNMP_PORT = int(
+    os.environ.get(
+        "SNMP_PORT",
+        "161",
+    )
+)
+
+SNMP_USERNAME = os.environ.get(
+    "SNMP_USERNAME",
+    "",
+)
+
+SNMP_AUTH_KEY = os.environ.get(
+    "SNMP_AUTH_KEY",
+    "",
+)
+
+SNMP_PRIV_KEY = os.environ.get(
+    "SNMP_PRIV_KEY",
+    "",
+)
+
+SNMP_TIMEOUT_SEC = float(
+    os.environ.get(
+        "SNMP_TIMEOUT_SEC",
+        "0.8",
+    )
+)
+
+SNMP_RETRIES = int(
+    os.environ.get(
+        "SNMP_RETRIES",
+        "0",
+    )
+)
+SNMP_DEVICES = {
+    "R1": {
+        "host": R1_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/2.99",
+        "direction": "rx",
+        "label": "R1 DSW-UPLINK RX",
+    },
+    "R2": {
+        "host": R2_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/2.99",
+        "direction": "rx",
+        "label": "R2 DSW-UPLINK RX",
+    },
+    "DSW1": {
+        "host": DSW1_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/2",
+        "direction": "rx",
+        "label": "DSW1 ASW-UPLINK RX",
+    },
+    "DSW2": {
+        "host": DSW2_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/2",
+        "direction": "rx",
+        "label": "DSW2 ASW-UPLINK RX",
+    },
+    "ASW": {
+        "host": ASW_VLAN99_IP,
+        "interface": "GigabitEthernet0/2",
+        "direction": "rx",
+        "label": "ASW CAMERA-PORT RX",
+    },
+}
 
 # ==============================================================================
 # [BƯỚC 3] CREDENTIALS SSH
@@ -47,10 +142,39 @@ SSH_TIMEOUT = 10
 # MacBook lắng nghe RTSP trên cổng 8554 (MediaMTX)
 # CAM01 trong GNS3 sẽ đẩy về: rtsp://TAILSCALE_MACBOOK_IP:8554/live
 RTSP_SERVER_PORT = 8554
-RTSP_STREAM_URL_CAM01 = f"rtsp://{TAILSCALE_MACBOOK_IP}:{RTSP_SERVER_PORT}/cam01"
-RTSP_STREAM_URL_CAM02 = f"rtsp://{TAILSCALE_MACBOOK_IP}:{RTSP_SERVER_PORT}/cam02"
-RTSP_FALLBACK_SIMULATE = True   # True = Mô phỏng camera khi không có GNS3 thật
+RTSP_STREAM_URL_CAM01 = (
+    f"rtsp://{TAILSCALE_IP_PI4}:{RTSP_SERVER_PORT}/cam01"
+)
 
+RTSP_STREAM_URL_CAM02 = (
+    f"rtsp://{TAILSCALE_IP_PI4}:{RTSP_SERVER_PORT}/cam02"
+)
+
+RTSP_FALLBACK_SIMULATE = True
+RTP_STREAMS = {
+    "CAM01": {
+        "destination_ip": TAILSCALE_IP_PI4,
+        "destination_port": 8000,
+        "label": "CAM01 RTP",
+    },
+    "CAM02": {
+        "destination_ip": TAILSCALE_IP_PI4,
+        "destination_port": 8002,
+        "label": "CAM02 RTP",
+    },
+}
+
+LOCAL_CAMERAS = {
+    "CAM03": {
+        "source": "picamera2",
+        "label": "CAM03 PI-CAMERA",
+    },
+    "CAM04": {
+        "source": "usb",
+        "device": "/dev/video0",
+        "label": "CAM04 USB-CAMERA",
+    },
+}
 # ==============================================================================
 # [BƯỚC 5] CHẾ ĐỘ AI
 # ==============================================================================
@@ -69,12 +193,10 @@ SYSLOG_LISTEN_PORT = 514         # UDP 514 (cần sudo trên Mac)
 SYSLOG_FALLBACK_PORT = 5514        # Port thay thế không cần sudo
 
 # Lắng nghe QoS Telemetry từ Tshark trên Macbook
-TAILSCALE_INTERFACE = "utun4"     # Card mạng Tailscale (Macbook)
+TAILSCALE_INTERFACE = RTP_CAPTURE_INTERFACE     # Card mạng Tailscale (Macbook)
 TELEMETRY_PORTS = {
     "8000": {"ID": "CAM01", "IP": "192.168.10.11"},
     "8002": {"ID": "CAM02", "IP": "192.168.10.12"},
-    "8004": {"ID": "CAM03", "IP": "192.168.10.13"},
-    "8006": {"ID": "CAM04", "IP": "192.168.10.14"}
 }
 # Chuyển thành False nếu muốn bắt gói tshark thật (Yêu cầu sudo)
 SIMULATE_TELEMETRY = False
