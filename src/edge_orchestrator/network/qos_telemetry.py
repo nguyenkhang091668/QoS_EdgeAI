@@ -2,13 +2,17 @@ import subprocess
 import time
 import json
 from PyQt5.QtCore import QThread, pyqtSignal
-from edge_orchestrator.core.config import TAILSCALE_INTERFACE, TELEMETRY_PORTS, SIMULATE_TELEMETRY
-import random
-
+from edge_orchestrator.core.config import (
+    BANDWIDTH_POLL_INTERVAL_SEC,
+    SIMULATE_TELEMETRY,
+    TAILSCALE_INTERFACE,
+    TELEMETRY_PORTS,
+)
 
 class QoSTelemetryWorker(QThread):
     # Phát ra danh sách dictionary các chỉ số QoS
     telemetry_signal = pyqtSignal(list)
+    collector_error_signal = pyqtSignal(str)
 
     def __init__(self, simulate=True):
         super().__init__()
@@ -18,25 +22,21 @@ class QoSTelemetryWorker(QThread):
     def run(self):
         while self.running:
             if self.simulate:
-                time.sleep(1.0)
-                metrics = []
-                for port, info in TELEMETRY_PORTS.items():
-                    metrics.append({
-                        "ID": info["ID"],
-                        "IP": info["IP"],
-                        "Port": int(port),
-                        "Bitrate_Mbps": round(random.uniform(0.5, 1.2), 2),
-                        "Loss_Percent": 0.0,
-                        "Jitter_ms": round(random.uniform(1.0, 4.0), 1),
-                        "Timestamp": time.strftime("%H:%M:%S")
-                    })
-                self.telemetry_signal.emit(metrics)
+                # Không phát dữ liệu giả.
+                # BandwidthStore sẽ tự chuyển nguồn
+                # sang STALE và biểu đồ để khoảng trống.
+                time.sleep(
+                    BANDWIDTH_POLL_INTERVAL_SEC
+                )
+                continue
             else:
-                metrics = self.get_qos_metrics()
+                try:
+                    metrics = self.get_qos_metrics()
+                except Exception as error:
+                    self.collector_error_signal.emit(str(error))
+                    time.sleep(BANDWIDTH_POLL_INTERVAL_SEC)
+                    continue
                 self.telemetry_signal.emit(metrics)
-                # Tshark duration:2 đã block 2s rồi nên không cần sleep thêm
-                # tuy nhiên ta có thể thêm 0.1s để tránh overload
-                time.sleep(0.1)
 
     def stop(self):
         self.running = False
@@ -64,15 +64,24 @@ class QoSTelemetryWorker(QThread):
             "-e", "frame.len",
             "-e", "rtp.seq"
         ]
-
         try:
             process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            stdout, _ = process.communicate()
-        except Exception as e:
-            print(f"[ERROR] Không thể chạy tshark: {e}")
-            return []
-
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stdout, stderr = process.communicate()
+        except OSError as error:
+            raise RuntimeError(f"Không thể chạy Tshark: {error}") from error
+        if process.returncode != 0:
+            error_text = stderr.strip()
+            if not error_text:
+                error_text = (
+                    f"Tshark exit code "
+                    f"{process.returncode}"
+                )
+            raise RuntimeError(error_text)
         lines = stdout.strip().split("\n")
         
         # Khởi tạo dữ liệu cho tất cả các cổng
@@ -104,7 +113,7 @@ class QoSTelemetryWorker(QThread):
                     loss_count = max(0, expected_packets - received_packets)
                     loss_pct = round((loss_count / expected_packets) * 100, 2)
             elif len(seqs) == 0:
-                loss_pct = 100.0 if bitrate_mbps == 0 else 0.0
+                loss_pct = 0.0
 
             # 3. Giả lập/Tính Jitter (ms) dựa trên độ lệch chuỗi
             jitter_ms = round(3.5 if bitrate_mbps > 0 else 0.0, 1)
@@ -134,7 +143,7 @@ if __name__ == "__main__":
             for m in metrics:
                 print(json.dumps(m, ensure_ascii=False, indent=2))
             print("-" * 50)
-            time.sleep(0.5)
+            time.sleep(BANDWIDTH_POLL_INTERVAL_SEC)
     except KeyboardInterrupt:
         print("\nĐã dừng giám sát QoS.")
         sys.exit(0)

@@ -168,6 +168,8 @@ RTP_STREAMS = {
 LOCAL_CAMERAS = {
     "CAM03": {
         "source": "picamera2",
+        "device": 0,
+        "jpeg_quality": 80,
         "label": "CAM03 PI-CAMERA",
     },
     "CAM04": {
@@ -177,6 +179,7 @@ LOCAL_CAMERAS = {
             "/dev/video0",
         ),
         "v4l2": True,
+        "jpeg_quality": 80,
         "label": "CAM04 USB-CAMERA",
     },
 }
