@@ -168,11 +168,18 @@ RTP_STREAMS = {
 LOCAL_CAMERAS = {
     "CAM03": {
         "source": "picamera2",
+        "device": 0,
+        "jpeg_quality": 80,
         "label": "CAM03 PI-CAMERA",
     },
     "CAM04": {
         "source": "usb",
-        "device": "/dev/video0",
+        "device": os.environ.get(
+            "USB_CAMERA_DEVICE",
+            "/dev/video0",
+        ),
+        "v4l2": True,
+        "jpeg_quality": 80,
         "label": "CAM04 USB-CAMERA",
     },
 }
