@@ -96,35 +96,114 @@ SNMP_RETRIES = int(
     )
 )
 SNMP_DEVICES = {
-    "R1": {
-        "host": R1_LOOPBACK_IP,
-        "interface": "GigabitEthernet0/2.99",
-        "direction": "rx",
-        "label": "R1 DSW-UPLINK RX",
-    },
-    "R2": {
-        "host": R2_LOOPBACK_IP,
-        "interface": "GigabitEthernet0/2.99",
-        "direction": "rx",
-        "label": "R2 DSW-UPLINK RX",
-    },
-    "DSW1": {
-        "host": DSW1_LOOPBACK_IP,
-        "interface": "GigabitEthernet0/2",
-        "direction": "rx",
-        "label": "DSW1 ASW-UPLINK RX",
-    },
-    "DSW2": {
-        "host": DSW2_LOOPBACK_IP,
-        "interface": "GigabitEthernet0/2",
-        "direction": "rx",
-        "label": "DSW2 ASW-UPLINK RX",
-    },
-    "ASW": {
+    # ==========================================================
+    # ASW — Camera đi vào và hai uplink tới DSW
+    # ==========================================================
+    "ASW_CAM": {
         "host": ASW_VLAN99_IP,
         "interface": "GigabitEthernet0/2",
         "direction": "rx",
-        "label": "ASW CAMERA-PORT RX",
+        "label": "ASW Camera Gi0/2 RX",
+    },
+    "ASW_DSW1": {
+        "host": ASW_VLAN99_IP,
+        "interface": "GigabitEthernet0/0",
+        "direction": "tx",
+        "label": "ASW to DSW1 Gi0/0 TX",
+    },
+    "ASW_DSW2": {
+        "host": ASW_VLAN99_IP,
+        "interface": "GigabitEthernet0/1",
+        "direction": "tx",
+        "label": "ASW to DSW2 Gi0/1 TX",
+    },
+
+    # ==========================================================
+    # DSW1 — ASW, EtherChannel và uplink R1
+    # ==========================================================
+    "DSW1_ASW": {
+        "host": DSW1_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/2",
+        "direction": "rx",
+        "label": "DSW1 from ASW Gi0/2 RX",
+    },
+    "DSW1_PO1": {
+        "host": DSW1_LOOPBACK_IP,
+        "interface": "Port-channel1",
+        "direction": "max",
+        "label": "DSW1 Port-channel1",
+    },
+    "DSW1_R1": {
+        "host": DSW1_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/0",
+        "direction": "tx",
+        "label": "DSW1 to R1 Gi0/0 TX",
+    },
+
+    # ==========================================================
+    # DSW2 — ASW, EtherChannel và uplink R2
+    # ==========================================================
+    "DSW2_ASW": {
+        "host": DSW2_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/2",
+        "direction": "rx",
+        "label": "DSW2 from ASW Gi0/2 RX",
+    },
+    "DSW2_PO1": {
+        "host": DSW2_LOOPBACK_IP,
+        "interface": "Port-channel1",
+        "direction": "max",
+        "label": "DSW2 Port-channel1",
+    },
+    "DSW2_R2": {
+        "host": DSW2_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/0",
+        "direction": "tx",
+        "label": "DSW2 to R2 Gi0/0 TX",
+    },
+
+    # ==========================================================
+    # R1 — DSW1, kết nối R2 và WAN
+    # ==========================================================
+    "R1_DSW1": {
+        "host": R1_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/2.99",
+        "direction": "rx",
+        "label": "R1 from DSW1 Gi0/2.99 RX",
+    },
+    "R1_R2": {
+        "host": R1_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/1",
+        "direction": "rx",
+        "label": "R1 from R2 Gi0/1 RX",
+    },
+    "R1_WAN": {
+        "host": R1_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/0",
+        "direction": "tx",
+        "label": "R1 WAN Gi0/0 TX",
+    },
+
+    # ==========================================================
+    # R2 — DSW2, kết nối R1 và WAN DHCP
+    # ==========================================================
+    "R2_DSW2": {
+        "host": R2_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/2.99",
+        "direction": "rx",
+        "label": "R2 from DSW2 Gi0/2.99 RX",
+    },
+    "R2_R1": {
+        "host": R2_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/1",
+        "direction": "tx",
+        "label": "R2 to R1 Gi0/1 TX",
+    },
+    "R2_WAN": {
+        "host": R2_LOOPBACK_IP,
+        "interface": "GigabitEthernet0/0",
+        "direction": "tx",
+        "label": "R2 WAN Gi0/0 TX",
     },
 }
 
@@ -164,25 +243,24 @@ RTP_STREAMS = {
         "label": "CAM02 RTP",
     },
 }
+USB_CAMERA_DEVICE = int(
+    os.environ.get(
+        "USB_CAMERA_DEVICE",
+        "0",
+    )
+)
 
 LOCAL_CAMERAS = {
     "CAM03": {
-        "source": "picamera2",
-        "device": 0,
-        "jpeg_quality": 80,
-        "label": "CAM03 PI-CAMERA",
-    },
-    "CAM04": {
         "source": "usb",
-        "device": os.environ.get(
-            "USB_CAMERA_DEVICE",
-            "/dev/video0",
-        ),
+        "device": USB_CAMERA_DEVICE,
         "v4l2": True,
         "jpeg_quality": 80,
-        "label": "CAM04 USB-CAMERA",
+        "enabled": True,
+        "label": "CAM03 USB-CAMERA",
     },
 }
+
 # ==============================================================================
 # [BƯỚC 5] CHẾ ĐỘ AI
 # ==============================================================================

@@ -7,7 +7,9 @@ from edge_orchestrator.core.config import (
     SIMULATE_TELEMETRY,
     TAILSCALE_INTERFACE,
     TELEMETRY_PORTS,
+    TAILSCALE_IP_PI4,
 )
+
 
 class QoSTelemetryWorker(QThread):
     # Phát ra danh sách dictionary các chỉ số QoS
@@ -42,27 +44,49 @@ class QoSTelemetryWorker(QThread):
         self.running = False
 
     def get_qos_metrics(self):
-        # Lấy danh sách cổng từ config (vd: 8000, 8002, 8004, 8006)
         ports = list(TELEMETRY_PORTS.keys())
-        
-        # Tạo động tham số decode -d udp.port==XXXX,rtp
+
+        capture_duration_sec = float(
+            BANDWIDTH_POLL_INTERVAL_SEC
+        )
+
         d_args = []
-        for p in ports:
-            d_args.extend(["-d", f"udp.port=={p},rtp"])
-        
-        # Tạo filter udp port 8000 or udp port 8002 or udp port 8004 or udp port 8006
-        port_filter = " or ".join([f"udp port {p}" for p in ports])
+        for port in ports:
+            d_args.extend(
+                [
+                    "-d",
+                    f"udp.port=={port},rtp",
+                ]
+            )
+
+        port_filter = " or ".join(
+            f"udp dst port {port}"
+            for port in ports
+        )
+
+        capture_filter = (
+            f"dst host {TAILSCALE_IP_PI4} "
+            f"and ({port_filter})"
+        )
 
         cmd = [
-            "sudo", "tshark", "-p",
-            "-i", TAILSCALE_INTERFACE,
-        ] + d_args + [
-            "-f", port_filter,
-            "-a", "duration:2",
-            "-T", "fields",
-            "-e", "udp.dstport",
-            "-e", "frame.len",
-            "-e", "rtp.seq"
+            "tshark",
+            "-p",
+            "-i",
+            TAILSCALE_INTERFACE,
+            *d_args,
+            "-f",
+            capture_filter,
+            "-a",
+            f"duration:{capture_duration_sec:g}",
+            "-T",
+            "fields",
+            "-e",
+            "udp.dstport",
+            "-e",
+            "frame.len",
+            "-e",
+            "rtp.seq",
         ]
         try:
             process = subprocess.Popen(
@@ -83,7 +107,7 @@ class QoSTelemetryWorker(QThread):
                 )
             raise RuntimeError(error_text)
         lines = stdout.strip().split("\n")
-        
+
         # Khởi tạo dữ liệu cho tất cả các cổng
         data_by_port = {p: {"bytes": 0, "seqs": []} for p in ports}
 
@@ -102,8 +126,8 @@ class QoSTelemetryWorker(QThread):
             seqs = sorted(data_by_port[port]["seqs"])
 
             # 1. Tính Bitrate (Mbps)
-            bitrate_mbps = round((total_bytes * 8) / (2 * 1_000_000), 2)
-
+            bitrate_mbps = round(
+                (total_bytes * 8 / capture_duration_sec / 1_000_000), 3)
             # 2. Tính Tỷ lệ Mất gói Packet Loss (%)
             loss_pct = 0.0
             if len(seqs) > 1:
