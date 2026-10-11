@@ -1,65 +1,3 @@
-from pathlib import Path
-from datetime import datetime
-import queue
-import threading
-import random
-import time
-import sys
-import numpy as np
-import matplotlib
-matplotlib.use("Qt5Agg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from edge_orchestrator.network.syslog_receiver import (
-    syslog_event_queue,
-)
-from edge_orchestrator.network.snmp_bandwidth_worker import (
-    CiscoBandwidthWorker,
-)
-from edge_orchestrator.network.snmp_bandwidth import (
-    CiscoBandwidthCollector,
-)
-from edge_orchestrator.network.qos_telemetry import (
-    QoSTelemetryWorker,
-)
-from edge_orchestrator.network.pysnmp_client import (
-    PySnmpV3Client,
-)
-from edge_orchestrator.network.network_controller import (
-    NetworkController,
-)
-from edge_orchestrator.network.bandwidth_types import (
-    BandwidthSample,
-    CollectorStatus,
-)
-from edge_orchestrator.network.bandwidth_store import (
-    BandwidthStore,
-)
-from edge_orchestrator.gui.ai_camera_worker import (
-    AICameraWorker,
-)
-from edge_orchestrator.network.local_camera_bandwidth import (
-    LocalCameraBandwidthWorker
-)
-from edge_orchestrator.core.event import EventType
-from edge_orchestrator.core.decision_engine import (
-    QoSDecisionEngine,
-    AIDecisionEngine,
-)
-from edge_orchestrator.core import config
-from PyQt5.QtGui import (
-    QFont,
-    QImage,
-    QPixmap,
-    QColor,
-    QPalette,
-)
-from PyQt5.QtCore import (
-    QTimer,
-    Qt,
-    pyqtSignal,
-    QObject,
-)
 from PyQt5.QtWidgets import (
     QWidget,
     QGridLayout,
@@ -71,6 +9,68 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSizePolicy,
 )
+from PyQt5.QtCore import (
+    QTimer,
+    Qt,
+    pyqtSignal,
+    QObject,
+)
+from PyQt5.QtGui import (
+    QFont,
+    QImage,
+    QPixmap,
+    QColor,
+    QPalette,
+)
+from edge_orchestrator.core import config
+from edge_orchestrator.core.decision_engine import (
+    QoSDecisionEngine,
+    AIDecisionEngine,
+)
+from edge_orchestrator.core.event import EventType
+from edge_orchestrator.network.local_camera_bandwidth import (
+    LocalCameraBandwidthWorker
+)
+from edge_orchestrator.gui.ai_camera_worker import (
+    AICameraWorker,
+)
+from edge_orchestrator.network.bandwidth_store import (
+    BandwidthStore,
+)
+from edge_orchestrator.network.bandwidth_types import (
+    BandwidthSample,
+    CollectorStatus,
+)
+from edge_orchestrator.network.network_controller import (
+    NetworkController,
+)
+from edge_orchestrator.network.pysnmp_client import (
+    PySnmpV3Client,
+)
+from edge_orchestrator.network.qos_telemetry import (
+    QoSTelemetryWorker,
+)
+from edge_orchestrator.network.snmp_bandwidth import (
+    CiscoBandwidthCollector,
+)
+from edge_orchestrator.network.snmp_bandwidth_worker import (
+    CiscoBandwidthWorker,
+)
+from edge_orchestrator.network.syslog_receiver import (
+    syslog_event_queue,
+)
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import matplotlib.pyplot as plt
+from pathlib import Path
+from datetime import datetime
+import queue
+import threading
+import random
+import time
+import sys
+import numpy as np
+import matplotlib
+matplotlib.use("Qt5Agg")
 
 try:
     import cv2
@@ -85,45 +85,27 @@ BANDWIDTH_SOURCE_IDS = (
     *config.RTP_STREAMS.keys(),
     *config.LOCAL_CAMERAS.keys(),
 )
-BANDWIDTH_LINE_STYLES = {
-    "R1": {
-        "color": "#00e676",
-        "linestyle": "-",
-    },
-    "R2": {
-        "color": "#76ff03",
-        "linestyle": "--",
-    },
-    "DSW1": {
-        "color": "#40c4ff",
-        "linestyle": "-",
-    },
-    "DSW2": {
-        "color": "#448aff",
-        "linestyle": "--",
-    },
-    "ASW": {
-        "color": "#e040fb",
-        "linestyle": "-.",
-    },
-    "CAM01": {
-        "color": "#ffca28",
-        "linestyle": "-",
-    },
-    "CAM02": {
-        "color": "#ff7043",
-        "linestyle": "--",
-    },
-    "CAM03": {
-        "color": "#f06292",
-        "linestyle": "-.",
-    },
-    "CAM04": {
-        "color": "#9575cd",
-        "linestyle": "--",
-    },
+DEVICE_COLOR = {
+    "R1": "#00e676",
+    "R2": "#76ff03",
+    "DSW1": "#40c4ff",
+    "DSW2": "#448aff",
+    "ASW": "#e040fb",
+    "CAM01": "#ffca28",
+    "CAM02": "#ff7043",
+    "CAM03": "#f06292",
 }
-
+LINE_STYLE = ("-", "--", ":", "-.")
+BANDWIDTH_LINE_STYLES = {
+    source_id: {
+        "color": DEVICE_COLOR.get(
+            source_id.split("_")[0],
+            "#ffffff",
+        ),
+        "linestyle": LINE_STYLE[i % len(LINE_STYLE)],
+    }
+    for i, source_id in enumerate(BANDWIDTH_SOURCE_IDS)
+}
 # Import từ các module nội bộ của package
 
 # ── SIGNAL BRIDGE (thread-safe GUI update) ───────────────────────────────────
@@ -211,7 +193,6 @@ class MainDashboard(QWidget):
                 "SIMULATE MODE: Netmiko → Disabled"
             )
         if not self.simulate_ai:
-            self._start_pi_camera_bandwidth_worker()
             self._start_ai_camera_worker()
         else:
             self.log_console(
@@ -240,13 +221,15 @@ class MainDashboard(QWidget):
             spine.set_edgecolor("#333333")
         for source_id in BANDWIDTH_SOURCE_IDS:
             style = BANDWIDTH_LINE_STYLES[source_id]
-            line, = self.ax.plot([],[],color=style["color"],linestyle=style["linestyle"],linewidth=1.4,
-                label=(f"{source_id} [{CollectorStatus.WARMING_UP.value}]"),)
+            line, = self.ax.plot([], [], color=style["color"], linestyle=style["linestyle"], linewidth=1.4,
+                                 label=(f"{source_id} [{CollectorStatus.WARMING_UP.value}]"),)
             self.bandwidth_lines[source_id] = line
-        self.ax.axhline(y=8.0,color="#ff5252",linestyle=":",linewidth=1,label="Ngưỡng QoS 8 Mbps")
-        self.ax.set_xlim(-config.BANDWIDTH_HISTORY_SEC,0)
+        self.ax.axhline(y=8.0, color="#ff5252", linestyle=":",
+                        linewidth=1, label="Ngưỡng QoS 8 Mbps")
+        self.ax.set_xlim(-config.BANDWIDTH_HISTORY_SEC, 0)
         self.ax.set_ylim(0, 10)
-        self.ax.legend(loc="upper left",fontsize=6,ncol=2,facecolor="#1a1a2e",labelcolor="white",framealpha=0.8,)
+        self.ax.legend(loc="upper left", fontsize=6, ncol=2,
+                       facecolor="#1a1a2e", labelcolor="white", framealpha=0.8,)
         self.canvas = FigureCanvas(self.fig)
         lay1.addWidget(self.canvas)
 
@@ -358,7 +341,8 @@ class MainDashboard(QWidget):
         self.telemetry_worker = QoSTelemetryWorker(
             simulate=config.SIMULATE_TELEMETRY)
         self.telemetry_worker.telemetry_signal.connect(self._update_telemetry)
-        self.telemetry_worker.collector_error_signal.connect(self._on_telemetry_collector_error)
+        self.telemetry_worker.collector_error_signal.connect(
+            self._on_telemetry_collector_error)
         self.telemetry_worker.start()
         sim_mode = "Mô phỏng" if config.SIMULATE_TELEMETRY else "Thực tế (tshark)"
         self.log_console(
@@ -381,7 +365,8 @@ class MainDashboard(QWidget):
                 self.pi_camera_bandwidth_worker
                 .bandwidth_signal.connect(self._on_local_camera_bandwidth)
             )
-            self.pi_camera_bandwidth_worker.error_signal.connect(self._on_local_camera_bandwidth_error)
+            self.pi_camera_bandwidth_worker.error_signal.connect(
+                self._on_local_camera_bandwidth_error)
             self.pi_camera_bandwidth_worker.start()
             self.log_console(
                 "[CAM03] Đã khởi động "
@@ -392,6 +377,7 @@ class MainDashboard(QWidget):
                 "CAM03",
                 str(error),
             )
+
     def _on_local_camera_bandwidth(
         self,
         source_id,
@@ -495,6 +481,7 @@ class MainDashboard(QWidget):
                 f"{source_id}: {message}",
                 alert=True,
             )
+
     def _start_snmp_bandwidth_worker(self):
         try:
             snmp_client = PySnmpV3Client(
@@ -517,9 +504,7 @@ class MainDashboard(QWidget):
                     interval_sec=(
                         config.BANDWIDTH_POLL_INTERVAL_SEC
                     ),
-                    max_workers=len(
-                        config.SNMP_DEVICES
-                    ),
+                    max_workers=min(5, len(config.SNMP_DEVICES)),
                 )
             )
             self.snmp_bandwidth_worker.samples_signal.connect(
@@ -530,10 +515,35 @@ class MainDashboard(QWidget):
             )
             self.snmp_bandwidth_worker.start()
             self.log_console(
-                f"[SNMP] Đã khởi động băng thông Cisco: {len(config.SNMP_DEVICES)} thiết bị",
+                f"[SNMP] Đã khởi động băng thông Cisco: "
+                f"{len(config.SNMP_DEVICES)} nguồn interface",
             )
-        except Exception as e:
-            self.log_console(f"[SNMP] Lỗi khởi động: {e}", alert=True)
+        except Exception as error:
+            sampled_at = time.time()
+            for source_id, device_config in config.SNMP_DEVICES.items():
+                error_sample = BandwidthSample.unavailable(
+                    source_id=source_id,
+                    source_type="snmp",
+                    status=CollectorStatus.COLLECTOR_ERROR,
+                    sampled_at=sampled_at,
+                    details={
+                        "host": device_config["host"],
+                        "interface": device_config["interface"],
+                        "direction": device_config["direction"],
+                        "label": device_config.get(
+                            "label",
+                            "",
+                        ),
+                    },
+                    error=str(error),
+                )
+
+                try:
+                    self.bandwidth_store.update(error_sample)
+                except Exception as store_error:
+                    self.log_console(f"[SNMP] Không thể lưu trạng thái lỗi {source_id}: {store_error}", alert=True)
+                self._bandwidth_status_cache[source_id] = CollectorStatus.COLLECTOR_ERROR
+            self.log_console(f"[SNMP] Lỗi khởi động collector: {error}", alert=True)
 
     def _on_snmp_bandwidth_samples(self, samples):
         for sample in samples:
@@ -584,7 +594,7 @@ class MainDashboard(QWidget):
         snapshot = self.bandwidth_store.snapshot(now=now)
         status_signature = []
         maximum_value = 0.0
-        valid_statuses = {CollectorStatus.ONLINE, CollectorStatus.STREAMING,}
+        valid_statuses = {CollectorStatus.ONLINE, CollectorStatus.STREAMING, }
         for source_id in BANDWIDTH_SOURCE_IDS:
             source_data = snapshot[source_id]
             status = source_data["status"]
@@ -605,7 +615,7 @@ class MainDashboard(QWidget):
         self.ax.set_xlim(-config.BANDWIDTH_HISTORY_SEC, 0)
         self.ax.set_ylim(0, max(10.0, maximum_value * 1.2))
         status_signature = tuple(status_signature)
-        if (status_signature!= self._bandwidth_legend_signature):
+        if (status_signature != self._bandwidth_legend_signature):
             self._bandwidth_legend_signature = (status_signature)
             self.ax.legend(
                 loc="upper left",
@@ -632,9 +642,11 @@ class MainDashboard(QWidget):
             person_detected = (
                 self._get_fresh_person_state()
             )
-        ai_state_change = self.ai_engine.update(person_detected,log_callback=lambda text, alert=False: self.log_console(text, alert),)
+        ai_state_change = self.ai_engine.update(
+            person_detected, log_callback=lambda text, alert=False: self.log_console(text, alert),)
         if ai_state_change is not None:
             self._on_ai_state_change(ai_state_change)
+
     def _on_ai_state_change(self, state: str):
         self._ai_state = state
 
@@ -792,6 +804,7 @@ class MainDashboard(QWidget):
                 f"[RTP COLLECTOR ERROR] {message}",
                 alert=True,
             )
+
     def _update_telemetry(self, metrics):
         """Cập nhật telemetry RTP và chỉ log khi trạng thái thay đổi."""
         valid_qos_metrics = []
@@ -1145,7 +1158,7 @@ class MainDashboard(QWidget):
         event.accept()
 
     def _start_ai_camera_worker(self):
-        usb_camera_config = config.LOCAL_CAMERAS["CAM04"]
+        usb_camera_config = config.LOCAL_CAMERAS["CAM03"]
         configured_model = getattr(
             config,
             "EDGE_MODEL_PATH",
@@ -1167,7 +1180,7 @@ class MainDashboard(QWidget):
             )
             return
         self.ai_camera_worker = AICameraWorker(
-            source_id="CAM04",
+            source_id="CAM03",
             bandwidth_interval_sec=(config.BANDWIDTH_POLL_INTERVAL_SEC),
             jpeg_quality=usb_camera_config.get("jpeg_quality", 80),
             camera_index=usb_camera_config[
@@ -1205,7 +1218,7 @@ class MainDashboard(QWidget):
         self.ai_camera_worker.start()
 
     def _on_ai_camera_error(self, message: str):
-        self._on_local_camera_bandwidth_error("CAM04", message)
+        self._on_local_camera_bandwidth_error("CAM03", message)
         self._latest_person_detected = False
         self._latest_ai_observation_at = None
 

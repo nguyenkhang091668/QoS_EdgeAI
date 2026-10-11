@@ -357,8 +357,10 @@ class CiscoBandwidthCollector:
         direction = config["direction"]
         if direction == "rx":
             display_value = rx_mbps
-        else:
+        elif direction == "tx":
             display_value = tx_mbps
+        elif direction == "max":
+            display_value = max(rx_mbps,tx_mbps)
 
         return BandwidthSample(
             source_id=source_id,
@@ -469,49 +471,23 @@ class CiscoBandwidthCollector:
             counters,
             InterfaceCounters,
         ):
-            raise SnmpReadError(
-                "read_interface must return "
-                "InterfaceCounters"
-            )
+            raise SnmpReadError("read_interface must return InterfaceCounters")
 
-        for name in (
-            "admin_status",
-            "oper_status",
-            "in_octets",
-            "out_octets",
-        ):
+        for name in ("admin_status","oper_status","in_octets","out_octets"):
             value = getattr(counters, name)
 
             if not isinstance(value, int):
-                raise SnmpReadError(
-                    f"{name} must be an integer"
-                )
+                raise SnmpReadError(f"{name} must be an integer")
 
             if value < 0:
-                raise SnmpReadError(
-                    f"{name} must not be negative"
-                )
+                raise SnmpReadError(f"{name} must not be negative")
 
     def _validate_device_configs(self):
-        for source_id, config in (
-            self.devices.items()
-        ):
-            for field_name in (
-                "host",
-                "interface",
-                "direction",
-            ):
+        for source_id, config in (self.devices.items()):
+            for field_name in ("host","interface","direction"):
                 if not config.get(field_name):
-                    raise ValueError(
-                        f"{source_id} missing "
-                        f"{field_name}"
-                    )
+                    raise ValueError(f"{source_id} missing {field_name}")
 
-            if (
-                config["direction"]
-                not in {"rx", "tx"}
-            ):
-                raise ValueError(
-                    f"{source_id} direction "
-                    "must be rx or tx"
+            if config["direction"]not in {"rx", "tx", "max"}:
+                raise ValueError(f"{source_id} direction must be rx or tx or max"
                 )
