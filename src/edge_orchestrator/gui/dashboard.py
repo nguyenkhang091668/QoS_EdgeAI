@@ -235,23 +235,20 @@ class MainDashboard(QWidget):
 
         # ── KHUNG 2: Camera + AI Status ───────────────────────────────────────
         g2 = QGroupBox(
-            " KHUNG 2: LUỒNG CAMERA & TRẠNG THÁI EDGE AI (CAM01 / CAM02)")
+            " KHUNG 2: CAM03 và CAM04 ")
         g2.setFont(QFont("Arial", 9, QFont.Bold))
         g2.setStyleSheet("QGroupBox { color: #40c4ff; border: 1.5px solid #40c4ff; "
                          "margin-top: 8px; padding: 4px; border-radius: 4px; }")
 
         lay2 = QVBoxLayout(g2)
-        self.lbl_camera = QLabel("Đang tải luồng RTSP từ CAM01...")
+        self.lbl_camera = QLabel("Đang mở CAM03")
         self.lbl_camera.setAlignment(Qt.AlignCenter)
         self.lbl_camera.setStyleSheet("background-color: #000000; border: 1px solid #223344; "
                                       "border-radius: 3px; min-height: 160px;")
-        self.lbl_status = QLabel("  Trạng thái AI: IDLE NORMAL (1 Mbps)")
+        self.lbl_status = QLabel("CAM03: đang khởi tạo camera và model...")
         self.lbl_status.setFont(QFont("Consolas", 11, QFont.Bold))
         self.lbl_status.setAlignment(Qt.AlignCenter)
-        self.lbl_status.setStyleSheet("color: #00e676; padding: 6px;")
-        self.lbl_status.setText("Edge AI unavailable")
-        self.lbl_status.setStyleSheet("""background-color: #000000; border: 1px solid #223344;
-                                     border-radius: 3px; min-height: 160px;""")
+        self.lbl_status.setStyleSheet("color: #ffca28; padding: 6px;")
         # Thống kê nhỏ
         stats_row = QHBoxLayout()
         self.lbl_detect_count = QLabel("Phát hiện: 0 lần")
@@ -541,9 +538,11 @@ class MainDashboard(QWidget):
                 try:
                     self.bandwidth_store.update(error_sample)
                 except Exception as store_error:
-                    self.log_console(f"[SNMP] Không thể lưu trạng thái lỗi {source_id}: {store_error}", alert=True)
+                    self.log_console(
+                        f"[SNMP] Không thể lưu trạng thái lỗi {source_id}: {store_error}", alert=True)
                 self._bandwidth_status_cache[source_id] = CollectorStatus.COLLECTOR_ERROR
-            self.log_console(f"[SNMP] Lỗi khởi động collector: {error}", alert=True)
+            self.log_console(
+                f"[SNMP] Lỗi khởi động collector: {error}", alert=True)
 
     def _on_snmp_bandwidth_samples(self, samples):
         for sample in samples:
@@ -652,8 +651,11 @@ class MainDashboard(QWidget):
 
         if state == "ALERT":
             self._detect_count += 1
+            self.lbl_detect_count.setText(
+                f" Phát hiện: {self._detect_count} lần"
+            )
             self.lbl_status.setText(
-                f" Trạng thái AI: PERSON DETECTED → ALERT ({self._detect_count} lần)"
+                " Trạng thái AI: PERSON DETECTED → ALERT"
             )
             self.lbl_status.setStyleSheet(
                 "color: #ff5252; padding: 6px;"
@@ -1218,6 +1220,9 @@ class MainDashboard(QWidget):
         self.ai_camera_worker.start()
 
     def _on_ai_camera_error(self, message: str):
+        self._ai_available = False
+        self.lbl_status.setText(f"CAM03/CAM04 error: {message}")
+        self.lbl_status.setStyleSheet("color: #ff5252; padding: 6px;")
         self._on_local_camera_bandwidth_error("CAM03", message)
         self._latest_person_detected = False
         self._latest_ai_observation_at = None
@@ -1231,15 +1236,12 @@ class MainDashboard(QWidget):
         self._ai_available = status == "RUNNING"
 
         if status == "RUNNING":
-            self.log_console(
-                "[EDGE AI] Camera và model đã sẵn sàng."
-            )
-
+            self.lbl_status.setText(
+                "CAM03/CAM04: Đã khởi tạo — sẵn sàng nhận diện")
+            self.lbl_status.setStyleSheet("color: #00e676; padding: 6px;")
+            self.log_console("[EDGE AI] Camera và model đã sẵn sàng.")
         elif status == "ERROR":
-            self.log_console(
-                "[EDGE AI] Camera/model gặp lỗi.",
-                alert=True,
-            )
+            self.log_console("[EDGE AI] Camera/model gặp lỗi.", alert=True,)
 
         elif status == "STOPPED":
             self._latest_person_detected = False

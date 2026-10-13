@@ -31,23 +31,61 @@ class Pipeline:
         self.last_ai = None
         self.last_ai_time = None
         self.clock = clock
+        self.inference_interval_sec = 0.5
 
     def step(self, frame):
         frame = normalize_frame(frame)
+
+        # Xử lý motion trên ảnh chưa vẽ bounding box.
         result = process_layer3(self.previous, frame)
-        self.previous = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # Require a valid filtered region inside ROI, not just anywhere in frame.
-        contours, _ = cv2.findContours(result['roi_mask'], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        result['roi_motion'] = result['valid'] and any(cv2.contourArea(c) >= 40 for c in contours)
-        result['triggered'] = self.machine.update(result['roi_motion'])
-        if result['triggered'] and self.detector is not None:
-            # Exceptions propagate: an inference error must not be reported as no object.
-            self.last_ai = self.detector.infer(result['roi'])
+        self.previous = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY,)
+        contours, _ = cv2.findContours(result["roi_mask"],cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE,)
+        result["roi_motion"] = (result["valid"] and any(cv2.contourArea(contour) >= 40 for contour in contours))
+        result["triggered"] = self.machine.update(result["roi_motion"])
+
+        now = self.clock()
+        due = (self.last_ai_time is None or now - self.last_ai_time >= self.inference_interval_sec)
+
+        result["inferred"] = False
+
+        if self.detector is not None and (result["triggered"] or due):
+            self.last_ai = self.detector.infer(result["roi"])
             self.last_ai_time = self.clock()
-        result['ai_enabled'] = self.detector is not None
-        result['ai'] = self.last_ai
-        result['ai_age'] = None if self.last_ai_time is None else self.clock() - self.last_ai_time
-        return frame, result
+            result["inferred"] = True
+
+        result["ai_enabled"] = self.detector is not None
+        result["ai"] = self.last_ai
+        result["ai_age"] = (
+            None
+            if self.last_ai_time is None
+            else self.clock() - self.last_ai_time
+        )
+
+        # Chỉ vẽ trên bản sao dùng để hiển thị.
+        display = frame.copy()
+
+        cv2.rectangle(display,(150, 100),(449, 399),(0, 255, 255),1)
+
+        if self.last_ai is not None:
+            for person in self.last_ai.get("persons", []):
+                x1, y1, x2, y2 = person["xyxy"]
+
+                # Box thuộc ROI: cộng offset để vẽ lên toàn frame.
+                x1 = int(round(x1 + 150))
+                y1 = int(round(y1 + 100))
+                x2 = int(round(x2 + 150))
+                y2 = int(round(y2 + 100))
+
+                x1 = max(0, min(639, x1))
+                x2 = max(0, min(639, x2))
+                y1 = max(0, min(479, y1))
+                y2 = max(0, min(479, y2))
+
+                cv2.rectangle(display,(x1, y1),(x2, y2),(0, 255, 0),2)
+                text = f"PERSON {person['score']:.2f}"
+                cv2.putText(display, text, (x1, max(18, y1 - 6)),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0, 255, 0),1,)
+
+        return display, result
 
 
 def render_pipeline(frame, result, machine):

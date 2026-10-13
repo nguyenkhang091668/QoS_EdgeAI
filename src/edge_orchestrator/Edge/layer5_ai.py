@@ -122,6 +122,7 @@ class Detector:
 
     def infer(self, roi):
         start = time.perf_counter()
+        persons = []
         if self.backend == '.tflite':
             rgb = letterbox_rgb(roi, self.height, self.width)
             tensor = encode_input(rgb, self.input)[None, ...]
@@ -143,6 +144,13 @@ class Detector:
                 verbose=False
             )[0]
             boxes = prediction.boxes
+            if boxes is not None:
+                for box in boxes:
+                    person_class = int(box.cls[0].item())
+                    person_score = float(box.conf[0].item())
+                    if person_class != 0:
+                        continue
+                    persons.append({"class_id": person_class, "score": person_score,"xyxy": box.xyxy[0].cpu().tolist(),})
             if boxes is None or len(boxes) == 0:
                 score, class_id, label = 0., -1, 'none'
             else:
@@ -150,7 +158,10 @@ class Detector:
                 score = float(boxes.conf[index].item())
                 class_id = int(boxes.cls[index].item())
                 label = prediction.names[class_id]
-        return dict(detected=score >= self.confidence, score=score, class_id=int(class_id),
-                    label=label, inference_ms=round(
-                        (time.perf_counter()-start)*1000, 2),
-                    backend=self.backend)
+        return {
+            "detected": score >= self.confidence,
+            "score": score,
+            "class_id": int(class_id),
+            "label": label,
+            "persons": persons,"inference_ms": round((time.perf_counter() - start) * 1000, 2),"backend": self.backend,
+        }

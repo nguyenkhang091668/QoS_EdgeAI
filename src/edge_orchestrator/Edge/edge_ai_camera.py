@@ -135,10 +135,9 @@ class EdgeAICamera:
             raise
         self._frame_id += 1
         event = None
-        if result['triggered']:
+        if result.get("inferred", False):
             self._last_ai_frame_id = self._frame_id
-            event = dict(type='ai_result', frame_id=self._frame_id, captured_at=captured_at,
-                         **copy.deepcopy(result['ai']))
+            event = {"type": "ai_result","frame_id": self._frame_id,"captured_at": captured_at,**copy.deepcopy(result["ai"])}
         metadata = {k:copy.deepcopy(v) for k,v in result.items() if not isinstance(v,np.ndarray)}
         metadata.update(frame_id=self._frame_id, captured_at=captured_at,
                         ai_frame_id=self._last_ai_frame_id,
