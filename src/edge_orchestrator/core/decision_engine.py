@@ -137,7 +137,7 @@ class QoSDecisionEngine:
                     reason_str = ", ".join(reasons)
                     if log_callback:
                         log_callback(
-                            f"[QOS ENGINE] ⚡ Cảnh báo QoS Suy thoái! Lý do: {reason_str}. KÍCH HOẠT AUTO-REMEDIATION.",
+                            f"[QOS ENGINE]  Cảnh báo QoS Suy thoái! Lý do: {reason_str}. Cảnh báo chất lượng luồng.",
                             alert=True
                         )
                     return "QOS_DEGRADED"
@@ -151,7 +151,7 @@ class QoSDecisionEngine:
                     self._current_state = "NORMAL"
                     if log_callback:
                         log_callback(
-                            f"[QOS ENGINE] Mạng đã ổn định trở lại sau {elapsed:.1f}s. HỦY AUTO-REMEDIATION.",
+                            f"[QOS ENGINE] Mạng đã ổn định trở lại sau {elapsed:.1f}s. Chất lượng luồng đã phục hồi.",
                             alert=False
                         )
                     return "NORMAL"

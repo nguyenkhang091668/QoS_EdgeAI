@@ -35,7 +35,7 @@ DEVICE_ACCESS_MAP = {
 
 class NetworkController:
     """
-    Điều khiển Dynamic QoS trên Router R1 thông qua Netmiko SSH.
+    Điều khiển Dynamic QoS trên Router thông qua Netmiko SSH.
     Hỗ trợ Jump Host xuyên qua Ubuntu server.
     """
 
@@ -155,7 +155,7 @@ class NetworkController:
             " class class-default",
             "  fair-queue"
         ]
-        print(f"[{threading.current_thread().name}] ℹ️ [RECOVERY] Đang hạ băng thông luồng Camera về 1 Mbps...")
+        print(f"[{threading.current_thread().name}]  [RECOVERY] Đang hạ băng thông luồng Camera về 1 Mbps...")
         threading.Thread(target=self._push_config,
                          args=(commands,), daemon=True).start()
 
@@ -174,7 +174,7 @@ class NetworkController:
             "interface GigabitEthernet0/0",
             " ip access-group ACL_ISOLATE_ATTACKER in",
         ]
-        print(f"[{threading.current_thread().name}] 🚫 [SECURITY] Đang cô lập kẻ tấn công {attacker_ip}...")
+        print(f"[{threading.current_thread().name}]  [SECURITY] Đang cô lập kẻ tấn công {attacker_ip}...")
         threading.Thread(target=self._push_config,
                          args=(commands,), daemon=True).start()
 

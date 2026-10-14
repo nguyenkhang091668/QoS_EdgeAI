@@ -130,7 +130,7 @@ class MainDashboard(QWidget):
         self.simulate_syslog = simulate_syslog
 
         self.setWindowTitle(
-            "TRẠM ĐIỀU PHỐI BIÊN — MacBook [Thay thế Pi 4] — TDTU ELV AGENT | Nguyễn Tiết Khang 41900966"
+            "TRẠM ĐIỀU PHỐI BIÊN — TDTU ELV AGENT | Nguyễn Tiết Khang 41900966"
         )
         try:
             W = config.DASHBOARD_WIDTH
@@ -910,10 +910,10 @@ class MainDashboard(QWidget):
     def _recalculate_target_policy(self):
         if self._ai_state == "ALERT":
             target_policy = "ALERT"
-        elif self._network_state == "QOS_DEGRADED":
-            target_policy = "ALERT"
-        else:
+        elif self._ai_state == "NORMAL":
             target_policy = "NORMAL"
+        else:
+            return
 
         if target_policy == self._applied_policy:
             return
@@ -925,7 +925,7 @@ class MainDashboard(QWidget):
         self._network_state = state
         if state == "QOS_DEGRADED":
             self.log_console(
-                "[NETWORK]  Mạng suy thoái — yêu cầu remediation.",
+                "[NETWORK]  Mạng suy thoái — cảnh báo giám sát.",
                 alert=True,
             )
         elif state == "NORMAL":
@@ -933,7 +933,6 @@ class MainDashboard(QWidget):
                 "[NETWORK]  Chất lượng mạng đã phục hồi.",
                 alert=False,
             )
-        self._recalculate_target_policy()
 
     def _apply_network_policy(self, policy: str):
         if self.simulate_netmiko:
@@ -1090,32 +1089,13 @@ class MainDashboard(QWidget):
         self._latest_ai_observation_at = time.monotonic()
         self._latest_ai_event = event
 
-        label = event.get("label", "unknown")
-        score = event.get("score", 0.0)
-        class_id = event.get("class_id", -1)
-
-        self.log_console(
-            f"[EDGE AI] class={class_id} "
-            f"label={label} "
-            f"score={score:.2f} "
-            f"person={person_detected}",
-            alert=person_detected,
-        )
-
     def _get_fresh_person_state(self):
         if self._latest_ai_observation_at is None:
             return False
 
-        age = (
-            time.monotonic()
-            - self._latest_ai_observation_at
-        )
+        age = time.monotonic() - self._latest_ai_observation_at
 
-        ttl = getattr(
-            config,
-            "AI_OBSERVATION_TTL_SEC",
-            3.0,
-        )
+        ttl = getattr(config, "AI_OBSERVATION_TTL_SEC", 3.0)
 
         if age > ttl:
             return False
