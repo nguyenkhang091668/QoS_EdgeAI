@@ -8,7 +8,7 @@ ultralytics==8.4.160
 ncnn
 
 # Điều khiển thiết bị mạng
-netmiko==4.3.0
+netmiko==4.5.0
 paramiko<3.0
 
 # Web dashboard

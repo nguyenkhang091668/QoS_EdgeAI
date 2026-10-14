@@ -26,7 +26,7 @@ class AICameraWorker(QThread):
         model_path=None,
         confidence=0.5,
         v4l2=False,
-        source_id="CAM04",
+        source_id="CAM03",
         bandwidth_interval_sec=2.0,
         jpeg_quality=80,
         parent=None,
