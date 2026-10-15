@@ -44,6 +44,7 @@ from edge_orchestrator.network.bandwidth_types import (
 from edge_orchestrator.network.network_controller import (
     NetworkController,
 )
+from edge_orchestrator.network.qos_sync import RouterQoSSynchronizer
 from edge_orchestrator.network.pysnmp_client import (
     PySnmpV3Client,
 )
@@ -114,6 +115,7 @@ BANDWIDTH_LINE_STYLES = {
 class SignalBridge(QObject):
     log_signal = pyqtSignal(str, bool)    # (text, is_alert)
     qos_signal = pyqtSignal(str)          # QoS mode: "alert" / "normal"
+    qos_result_signal = pyqtSignal(object)  # worker -> GUI: per-router result
     cam_signal = pyqtSignal(bool)         # is_alert
 
 
@@ -160,20 +162,26 @@ class MainDashboard(QWidget):
         self._ai_state = "NORMAL"
         self._ai_available = False
         self._network_state = "NORMAL"
-        self._applied_policy = "NORMAL"
+        self._desired_policy = "NORMAL"
+        self._qos_closing = False
         self._qos_mode = "NORMAL"
         self._detect_count = 0
         self._frame_num = 0
         self.telemetry_data = {}
-        self.network_controller = None
-        self._network_controller_error = None
+        self.network_controllers = {}
+        self._network_controller_errors = {}
         if not self.simulate_netmiko:
-            try:
-                self.network_controller = NetworkController(
-                    target_device="R1"
-                )
-            except Exception as error:
-                self._network_controller_error = str(error)
+            for name in ("R1", "R2"):
+                try:
+                    self.network_controllers[name] = NetworkController(target_device=name)
+                except Exception as error:
+                    self._network_controller_errors[name] = str(error)
+        self.qos_sync = RouterQoSSynchronizer(
+            self.network_controllers,
+            callback=bridge.qos_result_signal.emit,
+            retry_sec=15,
+            verify_sec=15,
+        )
 
         self._latest_person_detected = False
         self._latest_ai_observation_at = None
@@ -310,6 +318,7 @@ class MainDashboard(QWidget):
     def _connect_signals(self):
         bridge.log_signal.connect(self.log_console)
         bridge.qos_signal.connect(self._apply_network_policy)
+        bridge.qos_result_signal.connect(self._on_qos_sync_result)
         bridge.cam_signal.connect(self._update_cam_frame)
 
     def _start_timers(self):
@@ -322,6 +331,9 @@ class MainDashboard(QWidget):
         self.timer_bw.start(1000)   # Băng thông mỗi 1s
         self.timer_ai.start(2000)   # AI check mỗi 2s
         self.timer_sys.start(500)   # Syslog check mỗi 0.5s
+        self.timer_qos = QTimer(self)
+        self.timer_qos.timeout.connect(self._tick_qos_sync)
+        self.timer_qos.start(1000)  # Schedule only; SSH runs in per-router workers.
 
         # Boot log
         self.log_console(
@@ -329,8 +341,11 @@ class MainDashboard(QWidget):
         self.log_console(f"[SYSTEM] Chế độ: AI={'Mô phỏng' if self.simulate_ai else 'Thật'} | "
                          f"SSH={'Mô phỏng' if self.simulate_netmiko else 'Thật'} | "
                          f"Syslog={'Mô phỏng' if self.simulate_syslog else 'Thật'}")
-        self.log_console(
-            "[NETMIKO] Đang kiểm tra kết nối SSH tới R1 (10.255.255.1)...")
+        if not self.simulate_netmiko:
+            self.log_console(
+                "[DYNAMIC QOS] Điều phối R1/R2 độc lập; retry và xác minh mỗi 15s.")
+            for name, error in self._network_controller_errors.items():
+                self.log_console(f"[NETMIKO] [{name}] Lỗi khởi tạo: {error}", alert=True)
         self.log_console(
             "[TAILSCALE] VPN Overlay đang hoạt động — MacBook đã gia nhập Tailscale subnet")
 
@@ -908,18 +923,11 @@ class MainDashboard(QWidget):
             )
 
     def _recalculate_target_policy(self):
+        # Telemetry remains monitoring-only. Automatic QoS follows AI alone.
         if self._ai_state == "ALERT":
-            target_policy = "ALERT"
+            self._apply_network_policy("ALERT")
         elif self._ai_state == "NORMAL":
-            target_policy = "NORMAL"
-        else:
-            return
-
-        if target_policy == self._applied_policy:
-            return
-        success = self._apply_network_policy(target_policy)
-        if success:
-            self._applied_policy = target_policy
+            self._apply_network_policy("NORMAL")
 
     def _on_network_state_change(self, state: str):
         self._network_state = state
@@ -935,29 +943,36 @@ class MainDashboard(QWidget):
             )
 
     def _apply_network_policy(self, policy: str):
+        policy = policy.upper()
+        if self._qos_closing or policy not in {"ALERT", "NORMAL"}:
+            if not self._qos_closing:
+                self.log_console(f"[DYNAMIC QOS] Policy không hợp lệ: {policy}", alert=True)
+            return False
+        changed = policy != self._desired_policy
+        self._desired_policy = policy
         if self.simulate_netmiko:
-            self.log_console(
-                f"[NETMiko SIMULATION] Áp dụng policy {policy}"
-            )
+            if changed:
+                self.log_console(f"[NETMIKO SIMULATION] Yêu cầu policy {policy}")
             return True
-        if self.network_controller is None:
+        if changed:
             self.log_console(
-                "[NETMIKO] NetworkController chưa được khởi tạo.",
-                alert=True,
-            )
-            return False
-        if policy == "ALERT":
-            self.network_controller.apply_qos_remediation()
-            return True
-        elif policy == "NORMAL":
-            self.network_controller.revert_qos_remediation()
-            return True
-        else:
-            self.log_console(
-                f"[NETMIKO] Policy không hợp lệ: {policy}",
-                alert=True,
-            )
-            return False
+                f"[DYNAMIC QOS] Yêu cầu {policy} cho R1/R2; chờ xác minh từng router.")
+        self.qos_sync.set_desired_policy(policy)
+        self.qos_sync.reconcile()
+        # This is a request acknowledgement, never an applied-policy result.
+        return bool(self.network_controllers)
+
+    def _tick_qos_sync(self):
+        if not self._qos_closing and not self.simulate_netmiko:
+            self.qos_sync.reconcile()
+
+    def _on_qos_sync_result(self, event):
+        if self._qos_closing:
+            return
+        self.log_console(
+            f"[DYNAMIC QOS] [{event.device}] {event.message}",
+            alert=not event.success,
+        )
 
     def _manual_qos(self, mode: str):
         policy = mode.upper()
@@ -980,14 +995,15 @@ class MainDashboard(QWidget):
             )
             return
 
-        if self.network_controller is None:
+        controller = self.network_controllers.get("R1")
+        if controller is None:
             self.log_console(
-                "[ACL] NetworkController chưa được khởi tạo.",
+                "[ACL] Controller R1 chưa được khởi tạo.",
                 alert=True,
             )
             return
 
-        self.network_controller.isolate_attacker(
+        controller.isolate_attacker(
             attacker_ip,
             attacker_mac,
         )
@@ -1103,6 +1119,10 @@ class MainDashboard(QWidget):
         return self._latest_person_detected
 
     def closeEvent(self, event):
+        self._qos_closing = True
+        if hasattr(self, "timer_qos"):
+            self.timer_qos.stop()
+        self.qos_sync.close(timeout_sec=1.0)
         if hasattr(self, "timer_bw"):
             self.timer_bw.stop()
         if hasattr(self, "timer_ai"):
