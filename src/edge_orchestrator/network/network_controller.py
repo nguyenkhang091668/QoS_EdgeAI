@@ -1,74 +1,81 @@
-import sys
-import os
-import threading
-import time
+"""Cisco SSH operations for one device, reached through the GNS3 jump host."""
 
-# Đảm bảo python tìm thấy module root khi chạy độc lập
-sys.path.append(os.path.abspath(os.path.join(
-    os.path.dirname(__file__), '..', '..')))
+from contextlib import contextmanager
+import os
+import re
+import threading
+
+from edge_orchestrator.network.qos_sync import PolicySyncResult
 
 try:
     from netmiko import ConnectHandler
-except ImportError:
+    NETMIKO_IMPORT_ERROR = None
+except ImportError as error:
     ConnectHandler = None
+    NETMIKO_IMPORT_ERROR = str(error)
 
-import paramiko
+try:
+    import paramiko
+    PARAMIKO_IMPORT_ERROR = None
+except ImportError as error:
+    paramiko = None
+    PARAMIKO_IMPORT_ERROR = str(error)
 
-# Thông số tài khoản SSH Cisco Router
-SSH_USER = os.environ.get("SSH_USERNAME", "")
-SSH_PASS = os.environ.get("SSH_PASSWORD", "")
-SSH_ENABLE = os.environ.get("SSH_ENABLE_PASSWORD", "")
-
-# Thông số máy chủ Jump Host (Ubuntu GNS3)
-JUMP_IP = os.environ.get("JUMP_IP", "")
-JUMP_USER = os.environ.get("JUMP_USER", "")
-JUMP_PASS = os.environ.get("JUMP_PASS", "") 
-
-# Bản đồ truy cập thiết bị (thông qua NAT của GNS3 Server)
 DEVICE_ACCESS_MAP = {
-    "R1":   {"ip": "192.168.122.197", "port": 22},
-    "R2":   {"ip": "192.168.122.48",  "port": 22},
+    "R1": {"ip": "192.168.122.197", "port": 22},
+    "R2": {"ip": "192.168.122.48", "port": 22},
     "DSW1": {"ip": "192.168.122.197", "port": 2211},
-    "DSW2": {"ip": "192.168.122.48",  "port": 2211},
-    "ASW":  {"ip": "192.168.122.197", "port": 2221},
+    "DSW2": {"ip": "192.168.122.48", "port": 2211},
+    "ASW": {"ip": "192.168.122.197", "port": 2221},
 }
+CONFIG_ERROR_PATTERN = r"(?im)^\s*%\s*(?:Invalid|Incomplete|Ambiguous|Error|Unrecognized|Unknown)"
+QOS_SHOW_COMMAND = "show running-config | section policy-map TDTU_DYNAMIC_QOS"
+
 
 class NetworkController:
-    """
-    Điều khiển Dynamic QoS trên Router thông qua Netmiko SSH.
-    Hỗ trợ Jump Host xuyên qua Ubuntu server.
-    """
+    """One instance per device; SSH calls are synchronous for use in a worker."""
 
-    def __init__(self, target_device="R1", username=SSH_USER, password=SSH_PASS, secret=SSH_ENABLE):
-        device_info = DEVICE_ACCESS_MAP.get(target_device)
-        if not device_info:
+    def __init__(self, target_device="R1", username=None, password=None, secret=None):
+        if not isinstance(target_device, str) or target_device not in DEVICE_ACCESS_MAP:
             raise ValueError(f"Không tìm thấy thiết bị {target_device} trong DEVICE_ACCESS_MAP!")
         if ConnectHandler is None:
-            raise RuntimeError(
-                "Netmiko chưa được cài đặt."
-            )
+            raise RuntimeError(f"Không import được Netmiko: {NETMIKO_IMPORT_ERROR}")
+        if paramiko is None:
+            raise RuntimeError(f"Không import được Paramiko: {PARAMIKO_IMPORT_ERROR}")
+        device_info = DEVICE_ACCESS_MAP[target_device]
+        self.target_name = target_device
         self.target_ip = device_info["ip"]
         self.target_port = device_info["port"]
-        self.target_name = target_device
-        self.username = username
-        self.password = password
-        self.secret = secret
+        self.username = os.environ.get("SSH_USERNAME", "") if username is None else username
+        self.password = os.environ.get("SSH_PASSWORD", "") if password is None else password
+        self.secret = os.environ.get("SSH_ENABLE_PASSWORD", "") if secret is None else secret
+        # Serialize this device's ACL/legacy operations with its QoS worker only.
+        self._io_lock = threading.Lock()
 
     def _create_jump_socket(self):
-        """Khởi tạo luồng SSH trung chuyển qua Ubuntu Server."""
+        jump_ip = os.environ.get("JUMP_IP", "").strip()
+        if not jump_ip:
+            raise ValueError("JUMP_IP đang rỗng; cần nạp ssh.env trước khi chạy")
         jump_client = paramiko.SSHClient()
         jump_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        jump_client.connect(
-            hostname=JUMP_IP,
-            username=JUMP_USER,
-            password=JUMP_PASS,
-            timeout=10
-        )
-        jump_transport = jump_client.get_transport()
-        dest_addr = (self.target_ip, self.target_port)
-        local_addr = ("127.0.0.1", 0) 
-        channel = jump_transport.open_channel("direct-tcpip", dest_addr, local_addr)
-        return channel, jump_client
+        try:
+            jump_client.connect(
+                hostname=jump_ip,
+                username=os.environ.get("JUMP_USER", ""),
+                password=os.environ.get("JUMP_PASS", ""),
+                timeout=10, auth_timeout=10, banner_timeout=10,
+            )
+            transport = jump_client.get_transport()
+            if transport is None or not transport.is_active():
+                raise ConnectionError("SSH transport tới Jump Host không hoạt động")
+            channel = transport.open_channel(
+                "direct-tcpip", (self.target_ip, self.target_port),
+                ("127.0.0.1", 0), timeout=10,
+            )
+            return channel, jump_client
+        except Exception:
+            jump_client.close()
+            raise
 
     def _get_device_config(self, channel):
         return {
@@ -80,90 +87,133 @@ class NetworkController:
             "secret": self.secret,
             "sock": channel,
             "timeout": 15,
-            "disabled_algorithms": dict(pubkeys=["rsa-sha2-512", "rsa-sha2-256"])
+            "conn_timeout": 10,
+            "auth_timeout": 10,
+            "banner_timeout": 10,
+            "disabled_algorithms": {"pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]},
         }
 
-    def test_ssh_connection(self):
-        """Kiểm tra khả năng kết nối SSH tới thiết bị (Chạy ngầm - CI/CD)."""
-        jump_client = None
-        try:
-            channel, jump_client = self._create_jump_socket()
-            device_config = self._get_device_config(channel)
-            
-            with ConnectHandler(**device_config) as net_connect:
-                net_connect.enable()
-                prompt = net_connect.find_prompt()
-                print(f"[CI/CD] ĐÃ KẾT NỐI THÀNH CÔNG VÀO {self.target_name} ({prompt})")
-                return True
-        except Exception as e:
-            # Ghi log lỗi ngắn gọn
-            err_msg = str(e).split('\n')[0]
-            print(f"[CI/CD] KẾT NỐI {self.target_name} THẤT BẠI: {err_msg}")
-            return False
-        finally:
-            if jump_client:
-                jump_client.close()
+    @contextmanager
+    def _session(self):
+        with self._io_lock:
+            channel = jump_client = None
+            try:
+                channel, jump_client = self._create_jump_socket()
+                with ConnectHandler(**self._get_device_config(channel)) as connection:
+                    connection.enable()
+                    yield connection
+            finally:
+                try:
+                    if channel is not None:
+                        channel.close()
+                finally:
+                    if jump_client is not None:
+                        jump_client.close()
+
+    @staticmethod
+    def _send_config(connection, commands):
+        output = connection.send_config_set(
+            commands, error_pattern=CONFIG_ERROR_PATTERN, read_timeout=15,
+        )
+        # Also check explicitly for adapters that return CLI errors as output.
+        if re.search(CONFIG_ERROR_PATTERN, output):
+            raise RuntimeError("Cisco từ chối lệnh cấu hình: " + output.strip()[:300])
+        return output
 
     def _push_config(self, commands):
-        """Đẩy tập lệnh CLI cấu hình xuống thiết bị."""
-        jump_client = None
+        """Legacy/ACL entry point. Return actual send result, not thread startup."""
         try:
-            channel, jump_client = self._create_jump_socket()
-            device_config = self._get_device_config(channel)
-            
-            print(f"[NETMIKO] Đang mở phiên SSH tới {self.target_name}...")
-            with ConnectHandler(**device_config) as net_connect:
-                net_connect.enable()
-                print(f"[NETMIKO] Đang áp dụng Policy-map TDTU_DYNAMIC_QOS...")
-                output = net_connect.send_config_set(commands)
-                print(f"[NETMIKO] KẾT QUẢ PHẢN HỒI TỪ {self.target_name}:\n{output}\n")
-                return True
-        except Exception as e:
-            print(f"[NETMIKO] LỖI KHI CẤU HÌNH {self.target_name}: {e}")
+            with self._session() as connection:
+                self._send_config(connection, commands)
+            print(f"[NETMIKO] {self.target_name}: gửi cấu hình thành công.")
+            return True
+        except Exception as error:
+            print(f"[NETMIKO] {self.target_name}: gửi cấu hình thất bại: {error}")
             return False
-        finally:
-            if jump_client:
-                jump_client.close()
+
+    def test_ssh_connection(self):
+        try:
+            with self._session() as connection:
+                prompt = connection.find_prompt()
+            print(f"[CI/CD] ĐÃ KẾT NỐI THÀNH CÔNG VÀO {self.target_name} ({prompt})")
+            return True
+        except Exception as error:
+            print(f"[CI/CD] KẾT NỐI {self.target_name} THẤT BẠI: {error}")
+            return False
+
+    @staticmethod
+    def _camera_policy_matches(output, bandwidth_kbps):
+        """Read only CAMERA_CLASS within the intended policy, not another class."""
+        in_policy = in_camera = False
+        bandwidth_ok = dscp_ok = False
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if line.startswith("policy-map "):
+                if in_policy:
+                    break
+                in_policy = line == "policy-map TDTU_DYNAMIC_QOS"
+                continue
+            if not in_policy:
+                continue
+            if line.startswith("class "):
+                in_camera = line == "class CAMERA_CLASS"
+                continue
+            if in_camera:
+                bandwidth_ok |= line == f"bandwidth {bandwidth_kbps}"
+                dscp_ok |= bool(re.fullmatch(r"set (?:ip )?dscp (?:af41|34)", line))
+        return bandwidth_ok and dscp_ok
+
+    def ensure_qos_policy(self, policy):
+        """Read, update if needed, and read back on the same SSH session.
+
+        Exceptions propagate to the synchronizer so the GUI gets the real failure.
+        Even when the local cache matches, this read detects restarts/config drift.
+        """
+        policy = policy.upper()
+        if policy not in {"NORMAL", "ALERT"}:
+            raise ValueError(f"Policy không hợp lệ: {policy}")
+        bandwidth = 8000 if policy == "ALERT" else 1000
+        with self._session() as connection:
+            current = connection.send_command(QOS_SHOW_COMMAND, read_timeout=15)
+            if self._camera_policy_matches(current, bandwidth):
+                return PolicySyncResult(policy, changed=False)
+            commands = [
+                "policy-map TDTU_DYNAMIC_QOS",
+                " class CAMERA_CLASS",
+                f"  bandwidth {bandwidth}",
+                "  set ip dscp af41",
+                " class class-default",
+                "  fair-queue",
+            ]
+            self._send_config(connection, commands)
+            verified = connection.send_command(QOS_SHOW_COMMAND, read_timeout=15)
+            if not self._camera_policy_matches(verified, bandwidth):
+                raise RuntimeError(
+                    f"{self.target_name}: cấu hình đọc lại không khớp {policy} "
+                    f"(CAMERA_CLASS={bandwidth} kbps, DSCP AF41)"
+                )
+        return PolicySyncResult(policy, changed=True)
+
+    def set_qos_policy(self, policy):
+        """Compatibility helper; synchronous, with read-back verification."""
+        try:
+            self.ensure_qos_policy(policy)
+            return True
+        except Exception as error:
+            print(f"[QOS] {self.target_name}: đồng bộ thất bại: {error}")
+            return False
 
     def apply_qos_remediation(self):
-        """
-        KÍCH HOẠT KHI CÓ SỰ KIỆN SUY THOÁI MẠNG (QOS_DEGRADED):
-        Nâng băng thông class CAMERA_CLASS lên 8 Mbps (8000 Kbps) & đánh nhãn DSCP AF41.
-        """
-        commands = [
-            "policy-map TDTU_DYNAMIC_QOS",
-            " class CAMERA_CLASS",
-            "  bandwidth 8000",
-            "  set ip dscp af41",
-            " class class-default",
-            "  fair-queue"
-        ]
-        print(f"[{threading.current_thread().name}] ⚡ [REMEDIATION] Đang nâng băng thông luồng Camera lên 8 Mbps...")
-        threading.Thread(target=self._push_config,
-                         args=(commands,), daemon=True).start()
+        worker = threading.Thread(target=self.set_qos_policy, args=("ALERT",), daemon=True)
+        worker.start()
+        return worker
 
     def revert_qos_remediation(self):
-        """
-        KHÔI PHỤC TRẠNG THÁI BÌNH THƯỜNG (NORMAL):
-        Hạ băng thông class CAMERA_CLASS về lại 1 Mbps (1000 Kbps) chuẩn R1 config.
-        """
-        commands = [
-            "policy-map TDTU_DYNAMIC_QOS",
-            " class CAMERA_CLASS",
-            "  bandwidth 1000",
-            "  set ip dscp af41",
-            " class class-default",
-            "  fair-queue"
-        ]
-        print(f"[{threading.current_thread().name}]  [RECOVERY] Đang hạ băng thông luồng Camera về 1 Mbps...")
-        threading.Thread(target=self._push_config,
-                         args=(commands,), daemon=True).start()
+        worker = threading.Thread(target=self.set_qos_policy, args=("NORMAL",), daemon=True)
+        worker.start()
+        return worker
 
-    def isolate_attacker(self, attacker_ip: str, attacker_mac: str = None):
-        """
-        KÍCH HOẠT KHI PHÁT HIỆN PORT SECURITY VIOLATION HOẶC ARP SPOOFING (DAI):
-        Tạo ACL cô lập hoàn toàn IP/MAC của kẻ tấn công khỏi mạng.
-        """
+    def isolate_attacker(self, attacker_ip, attacker_mac=None):
         commands = [
             f"!--- AUTO-REMEDIATION: Isolate attacker {attacker_ip} ---",
             "ip access-list extended ACL_ISOLATE_ATTACKER",
@@ -174,17 +224,11 @@ class NetworkController:
             "interface GigabitEthernet0/0",
             " ip access-group ACL_ISOLATE_ATTACKER in",
         ]
-        print(f"[{threading.current_thread().name}]  [SECURITY] Đang cô lập kẻ tấn công {attacker_ip}...")
-        threading.Thread(target=self._push_config,
-                         args=(commands,), daemon=True).start()
+        worker = threading.Thread(target=self._push_config, args=(commands,), daemon=True)
+        worker.start()
+        return worker
 
 
 if __name__ == "__main__":
-    print("=== [CI/CD] BẮT ĐẦU KIỂM TRA ĐỒNG BỘ TOÀN BỘ THIẾT BỊ QUA JUMP HOST ===")
-    
-    # Duyệt qua toàn bộ thiết bị trong bản đồ và kiểm tra kết nối ngầm
-    for device_name in DEVICE_ACCESS_MAP.keys():
-        controller = NetworkController(target_device=device_name)
-        controller.test_ssh_connection()
-        
-    print("=== [CI/CD] HOÀN TẤT KIỂM TRA ===")
+    for name in DEVICE_ACCESS_MAP:
+        NetworkController(target_device=name).test_ssh_connection()
