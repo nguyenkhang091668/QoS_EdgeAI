@@ -256,20 +256,31 @@ LOCAL_CAMERAS = {
         "device": USB_CAMERA_DEVICE,
         "v4l2": True,
         "jpeg_quality": 80,
-        "enabled": True,
+        "enabled": os.environ.get("CAM03_ENABLED", "1") != "0",
         "label": "CAM03 USB-CAMERA",
     },
+    "CAM04": {
+        "source": os.environ.get("CAM04_SOURCE", "picamera2"),
+        "device": int(os.environ.get("CAM04_DEVICE", "0")),
+        "v4l2": False,
+        "jpeg_quality": 80,
+        "enabled": os.environ.get("CAM04_ENABLED", "1") != "0",
+        "label": "CAM04 Pi Camera",
+    }
 }
+AI_CONFIDENCE = 0.5
+AI_THREADS = int(os.environ.get("AI_THREADS", "2"))
+AI_OBSERVATION_TTL_SEC = 3.5
+AI_MAX_BOX_AGE_SEC = float(os.environ.get("AI_MAX_BOX_AGE_SEC", "2.0"))
+AI_ACTIVE_RECHECK_SEC = float(os.environ.get("AI_ACTIVE_RECHECK_SEC", "0.8"))
+AI_IDLE_RECHECK_SEC = float(os.environ.get("AI_IDLE_RECHECK_SEC", "1.5"))
+EDGE_MODEL_PATH = os.environ.get("EDGE_MODEL_PATH")
 
 # ==============================================================================
 # [BƯỚC 5] CHẾ ĐỘ AI
 # ==============================================================================
 SIMULATE_AI = True   # True = Mô phỏng (MacBook không có Pi camera)
-# False = Dùng YOLOv8 thật (khi chuyển sang Pi 4)
 AI_PERSON_DETECT_PROB = 0.25   # Xác suất giả lập phát hiện người (25%)
-AI_CONFIDENCE = 0.5
-AI_OBSERVATION_TTL_SEC = 3.0
-EDGE_MODEL_PATH = os.environ.get("EDGE_MODEL_PATH")
 CAMERA_INDEX = 0
 # ==============================================================================
 # [BƯỚC 6] SYSLOG SERVER & TELEMETRY (Tshark)
