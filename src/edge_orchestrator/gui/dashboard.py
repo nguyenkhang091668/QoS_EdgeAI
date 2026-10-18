@@ -8,6 +8,10 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QAbstractItemView,
 )
 from PyQt5.QtCore import (
     QTimer,
@@ -22,6 +26,7 @@ from PyQt5.QtGui import (
     QColor,
     QPalette,
 )
+from edge_orchestrator.gui.audit_log import AuditLogStore
 from edge_orchestrator.core import config
 from edge_orchestrator.core.decision_engine import (
     QoSDecisionEngine,
@@ -33,6 +38,7 @@ from edge_orchestrator.network.local_camera_bandwidth import (
 )
 from edge_orchestrator.gui.ai_camera_worker import (
     AICameraWorker,
+    SharedYOLOInferenceWorker,
 )
 from edge_orchestrator.network.bandwidth_store import (
     BandwidthStore,
@@ -64,6 +70,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
+from html import escape
 import queue
 import threading
 import random
@@ -95,6 +102,7 @@ DEVICE_COLOR = {
     "CAM01": "#ffca28",
     "CAM02": "#ff7043",
     "CAM03": "#f06292",
+    "CAM04": "#00e5ff",
 }
 LINE_STYLE = ("-", "--", ":", "-.")
 BANDWIDTH_LINE_STYLES = {
@@ -173,7 +181,8 @@ class MainDashboard(QWidget):
         if not self.simulate_netmiko:
             for name in ("R1", "R2"):
                 try:
-                    self.network_controllers[name] = NetworkController(target_device=name)
+                    self.network_controllers[name] = NetworkController(
+                        target_device=name)
                 except Exception as error:
                     self._network_controller_errors[name] = str(error)
         self.qos_sync = RouterQoSSynchronizer(
@@ -186,12 +195,16 @@ class MainDashboard(QWidget):
         self._latest_person_detected = False
         self._latest_ai_observation_at = None
         self._latest_ai_event = None
+        self._ai_observations_by_camera = {}
         self.pi_camera_bandwidth_worker = None
         self._local_camera_status_cache = {}
         self.ai_camera_worker = None
-
+        self.ai_camera_workers = {}
+        self.shared_yolo_worker = None
+        self.audit_log_store = AuditLogStore(1000)
         self._init_ui()
         self._connect_signals()
+        self._device_last_syslog = {}
         self._start_timers()
 
         if not self.simulate_netmiko:
@@ -242,18 +255,26 @@ class MainDashboard(QWidget):
         lay1.addWidget(self.canvas)
 
         # ── KHUNG 2: Camera + AI Status ───────────────────────────────────────
-        g2 = QGroupBox(
-            " KHUNG 2: CAM03 và CAM04 ")
+        g2 = QGroupBox(" KHUNG 2: CAM03 (USB) & CAM04 (CSI) — YOLOv8 NCNN ")
         g2.setFont(QFont("Arial", 9, QFont.Bold))
-        g2.setStyleSheet("QGroupBox { color: #40c4ff; border: 1.5px solid #40c4ff; "
-                         "margin-top: 8px; padding: 4px; border-radius: 4px; }")
-
+        g2.setStyleSheet(
+            "QGroupBox { color: #40c4ff; border: 1.5px solid #40c4ff; "
+            "margin-top: 8px; padding: 4px; border-radius: 4px; }"
+        )
         lay2 = QVBoxLayout(g2)
-        self.lbl_camera = QLabel("Đang mở CAM03")
-        self.lbl_camera.setAlignment(Qt.AlignCenter)
-        self.lbl_camera.setStyleSheet("background-color: #000000; border: 1px solid #223344; "
-                                      "border-radius: 3px; min-height: 160px;")
-        self.lbl_status = QLabel("CAM03: đang khởi tạo camera và model...")
+        cam_row = QHBoxLayout()
+        self.lbl_cam03 = QLabel("Đang mở CAM03 (USB)")
+        self.lbl_cam04 = QLabel("Đang mở CAM04 (CSI)")
+        for lbl in (self.lbl_cam03, self.lbl_cam04):
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(
+                "background-color: #000000; border: 1px solid #223344; "
+                "border-radius: 3px; min-height: 160px;"
+            )
+            cam_row.addWidget(lbl, stretch=1)
+        self.lbl_camera = self.lbl_cam03
+
+        self.lbl_status = QLabel("CAM03 & CAM04: đang khởi tạo camera và model...")
         self.lbl_status.setFont(QFont("Consolas", 11, QFont.Bold))
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setStyleSheet("color: #ffca28; padding: 6px;")
@@ -270,7 +291,7 @@ class MainDashboard(QWidget):
         stats_row.addStretch()
         stats_row.addWidget(self.lbl_mode_badge)
 
-        lay2.addWidget(self.lbl_camera, stretch=3)
+        lay2.addLayout(cam_row, stretch=3)
         lay2.addWidget(self.lbl_status)
         lay2.addLayout(stats_row)
 
@@ -284,6 +305,7 @@ class MainDashboard(QWidget):
         lay3 = QVBoxLayout(g3)
         self.txt_console = QTextEdit()
         self.txt_console.setReadOnly(True)
+        self.txt_console.document().setMaximumBlockCount(1000)
         self.txt_console.setFont(QFont("Menlo", 9))
         self.txt_console.setStyleSheet("background-color: #0a0a0f; color: #00e676; "
                                        "border: none; padding: 4px;")
@@ -307,14 +329,126 @@ class MainDashboard(QWidget):
 
         lay3.addWidget(self.txt_console, stretch=1)
         lay3.addLayout(btn_row)
+                # ── KHUNG 4: Tình trạng Online của Cổng & Thiết bị ────────────────────
+        g4 = QGroupBox(
+            " KHUNG 4: TÌNH TRẠNG ONLINE CÁC CỔNG & THIẾT BỊ — Device & Port Status"
+        )
+        g4.setFont(QFont("Arial", 9, QFont.Bold))
+        g4.setStyleSheet(
+            "QGroupBox { color: #ffca28; border: 1.5px solid #ffca28; "
+            "margin-top: 8px; padding: 4px; border-radius: 4px; }"
+        )
+        lay4 = QVBoxLayout(g4)
+        self.tbl_status = QTableWidget()
+        self.tbl_status.setColumnCount(4)
+        self.tbl_status.setHorizontalHeaderLabels(
+            ["Thiết bị / Nguồn", "Cổng / Luồng", "Trạng thái", "Chi tiết / QoS"]
+        )
+        self.tbl_status.verticalHeader().setVisible(False)
+        self.tbl_status.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_status.setSelectionMode(QAbstractItemView.NoSelection)
+        self.tbl_status.setFocusPolicy(Qt.NoFocus)
+        self.tbl_status.setFont(QFont("Menlo", 8))
+        self.tbl_status.setStyleSheet(
+            "QTableWidget { background-color: #0a0a0f; color: #e6edf3; "
+            "gridline-color: #21262d; border: none; } "
+            "QHeaderView::section { background-color: #161b22; color: #ffca28; "
+            "font-weight: bold; font-size: 8pt; border: 1px solid #21262d; padding: 2px; }"
+        )
+        header4 = self.tbl_status.horizontalHeader()
+        header4.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header4.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header4.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header4.setSectionResizeMode(3, QHeaderView.Stretch)
+
+        # Khởi tạo sẵn các hàng cố định (15 cổng SNMP + 2 luồng RTP + 2 Camera локаl)
+        self._status_rows = (
+            *config.SNMP_DEVICES.keys(),
+            *config.RTP_STREAMS.keys(),
+            *config.LOCAL_CAMERAS.keys(),
+        )
+        self.tbl_status.setRowCount(len(self._status_rows))
+        self._status_cells = {}
+        for row_idx, source_id in enumerate(self._status_rows):
+            self.tbl_status.setRowHeight(row_idx, 20)
+            port_label = self._get_source_port_label(source_id)
+            items = [
+                QTableWidgetItem(source_id),
+                QTableWidgetItem(port_label),
+                QTableWidgetItem("WARMING_UP"),
+                QTableWidgetItem("—"),
+            ]
+            for col_idx, item in enumerate(items):
+                if col_idx in (0, 2):
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.tbl_status.setItem(row_idx, col_idx, item)
+            self._status_cells[source_id] = items
+
+        lay4.addWidget(self.tbl_status)
 
         # ── Bố trí Grid ───────────────────────────────────────────────────────
         main_layout.addWidget(g1, 0, 0, 1, 1)
         main_layout.addWidget(g2, 0, 1, 1, 1)
-        main_layout.addWidget(g3, 1, 0, 1, 2)
+        main_layout.addWidget(g3, 1, 0, 1, 1)
+        main_layout.addWidget(g4, 1, 1, 1, 1)
         main_layout.setRowStretch(0, 3)
         main_layout.setRowStretch(1, 2)
 
+    def _get_source_port_label(self, source_id: str) -> str:
+        if source_id in config.SNMP_DEVICES:
+            dev = config.SNMP_DEVICES[source_id]
+            return f"{dev['interface']} ({dev['direction'].upper()})"
+        if source_id in config.RTP_STREAMS:
+            rtp = config.RTP_STREAMS[source_id]
+            return f"UDP/{rtp['destination_port']}"
+        if source_id in config.LOCAL_CAMERAS:
+            cam = config.LOCAL_CAMERAS[source_id]
+            return f"{cam['source'].upper()} #{cam['device']}"
+        return "—"
+
+    def _update_device_status_table(self, snapshot: dict):
+        if not hasattr(self, "_status_cells"):
+            return
+        qos_snap = self.qos_sync.snapshot() if hasattr(self, "qos_sync") else {}
+
+        for source_id, items in self._status_cells.items():
+            info = snapshot.get(source_id, {})
+            status_enum = info.get("status", CollectorStatus.WARMING_UP)
+            sample = info.get("sample")
+            status_text = status_enum.value if hasattr(status_enum, "value") else str(status_enum)
+
+            # Xác định màu sắc theo trạng thái
+            if status_text in ("ONLINE", "STREAMING", "RUNNING"):
+                color = QColor("#00e676")  # Xanh lá
+            elif status_text in ("WARMING_UP", "STALE", "NO_STREAM"):
+                color = QColor("#ffca28")  # Vàng
+            else:
+                color = QColor("#ff5252")  # Đỏ (INTERFACE_DOWN, OFFLINE, COLLECTOR_ERROR)
+
+            # Chi tiết tốc độ / QoS / Loss
+            detail_text = "—"
+            if sample is not None and sample.value_mbps is not None:
+                detail_text = f"{sample.value_mbps:.2f} Mbps"
+                if source_id in config.RTP_STREAMS and sample.details:
+                    loss = sample.details.get("loss_percent", 0.0)
+                    jitter = sample.details.get("jitter_ms", 0.0)
+                    detail_text += f" | L:{loss:.1f}% J:{jitter:.1f}ms"
+            elif sample is not None and sample.error:
+                detail_text = sample.error[:35]
+
+            # Nếu là nhánh WAN của R1/R2 thì ghép thêm trạng thái QoS Policy
+            router_prefix = source_id.split("_")[0]
+            if source_id in ("R1_WAN", "R2_WAN") and router_prefix in qos_snap:
+                applied = qos_snap[router_prefix].get("applied_policy") or self._desired_policy
+                detail_text = f"{detail_text} | QoS:{applied}"
+
+            # Chỉ cập nhật GUI khi text thay đổi để tiết kiệm CPU
+            if items[2].text() != status_text:
+                items[2].setText(status_text)
+                items[2].setForeground(color)
+            if items[3].text() != detail_text:
+                items[3].setText(detail_text)
+                
     def _connect_signals(self):
         bridge.log_signal.connect(self.log_console)
         bridge.qos_signal.connect(self._apply_network_policy)
@@ -333,7 +467,8 @@ class MainDashboard(QWidget):
         self.timer_sys.start(500)   # Syslog check mỗi 0.5s
         self.timer_qos = QTimer(self)
         self.timer_qos.timeout.connect(self._tick_qos_sync)
-        self.timer_qos.start(1000)  # Schedule only; SSH runs in per-router workers.
+        # Schedule only; SSH runs in per-router workers.
+        self.timer_qos.start(1000)
 
         # Boot log
         self.log_console(
@@ -345,7 +480,8 @@ class MainDashboard(QWidget):
             self.log_console(
                 "[DYNAMIC QOS] Điều phối R1/R2 độc lập; retry và xác minh mỗi 15s.")
             for name, error in self._network_controller_errors.items():
-                self.log_console(f"[NETMIKO] [{name}] Lỗi khởi tạo: {error}", alert=True)
+                self.log_console(
+                    f"[NETMIKO] [{name}] Lỗi khởi tạo: {error}", alert=True)
         self.log_console(
             "[TAILSCALE] VPN Overlay đang hoạt động — MacBook đã gia nhập Tailscale subnet")
 
@@ -640,7 +776,7 @@ class MainDashboard(QWidget):
                 framealpha=0.8,
             )
         self.canvas.draw_idle()
-
+        self._update_device_status_table(snapshot)
     def _tick_ai(self):
         if self.simulate_ai:
             probability = getattr(
@@ -656,6 +792,9 @@ class MainDashboard(QWidget):
             person_detected = (
                 self._get_fresh_person_state()
             )
+            if person_detected is None:
+                # Không coi dữ liệu hết hạn/chưa xác nhận là không có người
+                return
         ai_state_change = self.ai_engine.update(
             person_detected, log_callback=lambda text, alert=False: self.log_console(text, alert),)
         if ai_state_change is not None:
@@ -718,30 +857,18 @@ class MainDashboard(QWidget):
                     "timestamp",
                     "??:??:??",
                 )
-
+                device = event.get("device_name") or event.get("source_ip", "UNKOWN") 
+                self._device_last_syslog[device] = f"{event_type}"
                 if event_type == EventType.PORT_SECURITY_VIOLATION:
                     mac = data.get("mac")
                     interface = data.get("interface", "?")
-
-                    self.log_console(
-                        f"[{timestamp}] PORT SECURITY VIOLATION | "
-                        f"MAC: {mac or '?'} | "
-                        f"Port: {interface}",
-                        alert=True,
-                    )
-
+                    self.log_console(f"[{timestamp}] [{device}] PORT SECURITY VIOLATION | MAC: {mac or '?'} | Port: {interface}", alert=True )
                 elif event_type == EventType.DAI_ARP_SPOOFING_DENY:
                     attacker_ip = data.get("src_ip")
                     attacker_mac = data.get("src_mac")
                     interface = data.get("interface", "?")
 
-                    self.log_console(
-                        f"[{timestamp}] DAI ARP SPOOFING | "
-                        f"IP: {attacker_ip or '?'} | "
-                        f"MAC: {attacker_mac or '?'} | "
-                        f"Port: {interface}",
-                        alert=True,
-                    )
+                    self.log_console(f"[{timestamp}] [{device}] DAI ARP SPOOFING | IP: {attacker_ip or '?'} | MAC: {attacker_mac or '?'} | Port: {interface}", alert=True)
 
                     if attacker_ip:
                         self._run_acl_remediation(
@@ -756,30 +883,13 @@ class MainDashboard(QWidget):
                         )
 
                 elif event_type == EventType.INTERFACE_LINK_CHANGE:
-                    state = data.get(
-                        "state",
-                        "unknown",
-                    ).upper()
-
-                    interface = data.get(
-                        "interface",
-                        "?",
-                    )
-
-                    self.log_console(
-                        f"[{timestamp}] Interface "
-                        f"{interface}: {state}",
-                        alert=(state == "DOWN"),
-                    )
-
+                    state = data.get("state","unknown").upper()
+                    interface = data.get("interface","?")
+                    self.log_console(f"[{timestamp}] [{device}] Interface {interface}: {state}", alert=(state == "DOWN"))
                 else:
                     raw = event.get("raw", "")
                     details = event.get("details", raw)
-
-                    self.log_console(
-                        f"[{timestamp}] "
-                        f"{event_type}: {details[:120]}"
-                    )
+                    self.log_console(f"[{timestamp}] [{device}] {event_type}: {details[:120]}")
 
         except queue.Empty:
             pass
@@ -946,13 +1056,15 @@ class MainDashboard(QWidget):
         policy = policy.upper()
         if self._qos_closing or policy not in {"ALERT", "NORMAL"}:
             if not self._qos_closing:
-                self.log_console(f"[DYNAMIC QOS] Policy không hợp lệ: {policy}", alert=True)
+                self.log_console(
+                    f"[DYNAMIC QOS] Policy không hợp lệ: {policy}", alert=True)
             return False
         changed = policy != self._desired_policy
         self._desired_policy = policy
         if self.simulate_netmiko:
             if changed:
-                self.log_console(f"[NETMIKO SIMULATION] Yêu cầu policy {policy}")
+                self.log_console(
+                    f"[NETMIKO SIMULATION] Yêu cầu policy {policy}")
             return True
         if changed:
             self.log_console(
@@ -1057,15 +1169,29 @@ class MainDashboard(QWidget):
             self.lbl_camera.setTextFormat(Qt.RichText)
 
     # ── LOG CONSOLE ───────────────────────────────────────────────────────────
-    def log_console(self, text: str, alert: bool = False):
-        color = "#ff5252" if alert else "#00e676"
-        ts = datetime.now().strftime("[%H:%M:%S]")
-        self.txt_console.append(f"<font color='{color}'>{ts} {text}</font>")
-        # Auto-scroll
-        sb = self.txt_console.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    def _on_real_camera_frame(self, frame):
+    def log_console(
+        self,
+        text: str,
+        alert: bool = False,
+        category: str = "Hệ thống",
+    ):
+        if category == "Hệ thống" and text.startswith("[DYNAMIC QOS]"):
+            category = "Dynamic QoS"
+        entry = self.audit_log_store.append(message=text, category=category, alert=alert)
+        self._append_log_entry(entry)
+    def _append_log_entry(self, entry):
+        color = "#ff5252" if entry.alert else "#00e676"
+        timestamp = escape(entry.timestamp)
+        category = escape(entry.category)
+        message = escape(entry.message)
+        self.txt_console.append(
+            f"<font color='{color}'>"
+            f"[{timestamp}] [{category}] {message}"
+            f"</font>"
+        )
+        scrollbar = self.txt_console.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+    def _on_real_camera_frame(self, frame, source_id="CAM03"):
         if frame is None:
             return
 
@@ -1086,37 +1212,145 @@ class MainDashboard(QWidget):
         ).copy()
 
         pixmap = QPixmap.fromImage(image)
-
-        self.lbl_camera.setPixmap(
+        target_label = (
+            getattr(self, "lbl_cam04", self.lbl_camera)
+            if source_id == "CAM04"
+            else getattr(self, "lbl_cam03", self.lbl_camera)
+        )
+        target_label.setPixmap(
             pixmap.scaled(
-                self.lbl_camera.width(),
-                self.lbl_camera.height(),
+                target_label.width(),
+                target_label.height(),
                 Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
+                Qt.FastTransformation,
             )
         )
+
+    def _on_real_camera_frame_packet(
+        self,
+        source_id: str,
+        frame_id: int,
+        captured_at: float,
+        frame,
+    ):
+        frame_meta = getattr(self, "_latest_frame_meta_by_camera", None)
+        if frame_meta is None:
+            frame_meta = {}
+            self._latest_frame_meta_by_camera = frame_meta
+        frame_meta[source_id] = {
+            "source_id": source_id,
+            "frame_id": frame_id,
+            "captured_at": captured_at,
+        }
+        self._on_real_camera_frame(frame, source_id)
 
     def _on_ai_observation(
         self,
         person_detected: bool,
         event: dict,
+        source_id: str = None,
     ):
-        self._latest_person_detected = person_detected
-        self._latest_ai_observation_at = time.monotonic()
+        now_mono = time.monotonic()
+        obs_map = getattr(self, "_ai_observations_by_camera", None)
+        if obs_map is None:
+            obs_map = {}
+            self._ai_observations_by_camera = obs_map
+
+        cam_id = (
+            source_id
+            or (event.get("source_id") if isinstance(event, dict) else None)
+            or "CAM03"
+        )
+        frame_id = event.get("frame_id") if isinstance(event, dict) else None
+        captured_at = event.get("captured_at") if isinstance(event, dict) else None
+
+        prev = obs_map.get(cam_id)
+        if (
+            prev is not None
+            and frame_id is not None
+            and prev.get("frame_id") is not None
+            and frame_id < prev["frame_id"]
+        ):
+            return
+
+        obs_map[cam_id] = {
+            "source_id": cam_id,
+            "person_detected": bool(person_detected),
+            "observed_at": now_mono,
+            "captured_at": captured_at,
+            "frame_id": frame_id,
+            "event": event,
+        }
+        self._latest_person_detected = any(
+            item.get("person_detected", False) for item in obs_map.values()
+        )
+        self._latest_ai_observation_at = now_mono
         self._latest_ai_event = event
 
     def _get_fresh_person_state(self):
-        if self._latest_ai_observation_at is None:
+        now = time.monotonic()
+        ttl = getattr(config, "AI_OBSERVATION_TTL_SEC", 3.5)
+        obs_map = getattr(self, "_ai_observations_by_camera", None) or {}
+
+        if not obs_map:
+            if self._latest_ai_observation_at is None:
+                return None
+            age = now - self._latest_ai_observation_at
+            if age > ttl:
+                return None
+            return self._latest_person_detected
+
+        has_fresh_true = False
+        has_fresh_false = False
+        has_expired_true = False
+
+        active_cams = getattr(self, "_active_ai_cameras", None)
+        cam_ids = active_cams if active_cams else obs_map.keys()
+
+        for cam_id in cam_ids:
+            item = obs_map.get(cam_id)
+            if item is None or item.get("observed_at") is None:
+                continue
+            age = now - item["observed_at"]
+            detected = bool(item.get("person_detected", False))
+            if age <= ttl:
+                if detected:
+                    has_fresh_true = True
+                else:
+                    has_fresh_false = True
+            else:
+                if detected:
+                    has_expired_true = True
+
+        if has_fresh_true:
+            return True
+        if has_expired_true:
+            # Dữ liệu phát hiện người đã hết hạn nhưng chưa có kết quả inference mới xác nhận không người
+            return None
+        if has_fresh_false:
             return False
+        return None
 
-        age = time.monotonic() - self._latest_ai_observation_at
+    def _stop_ai_workers(self):
+        """Dừng và giải phóng an toàn: dừng các luồng capture trước, sau đó đánh thức và dừng worker YOLO chung."""
+        workers = list(getattr(self, "ai_camera_workers", {}).values())
+        for worker in workers:
+            if hasattr(worker, "request_stop"):
+                worker.request_stop()
+        for worker in workers:
+            worker.stop()
+        if (
+            self.ai_camera_worker is not None
+            and self.ai_camera_worker not in workers
+        ):
+            self.ai_camera_worker.stop()
+        self.ai_camera_workers = {}
+        self.ai_camera_worker = None
 
-        ttl = getattr(config, "AI_OBSERVATION_TTL_SEC", 3.0)
-
-        if age > ttl:
-            return False
-
-        return self._latest_person_detected
+        yolo_worker = getattr(self, "shared_yolo_worker", None)
+        if yolo_worker is not None:
+            yolo_worker.stop()
+            self.shared_yolo_worker = None
 
     def closeEvent(self, event):
         self._qos_closing = True
@@ -1132,8 +1366,7 @@ class MainDashboard(QWidget):
         if hasattr(self, "telemetry_worker"):
             self.telemetry_worker.stop()
             self.telemetry_worker.wait(3000)
-        if self.ai_camera_worker is not None:
-            self.ai_camera_worker.stop()
+        self._stop_ai_workers()
         if self.snmp_bandwidth_worker is not None:
             self.snmp_bandwidth_worker.stop()
             stopped = self.snmp_bandwidth_worker.wait(
@@ -1160,89 +1393,123 @@ class MainDashboard(QWidget):
         event.accept()
 
     def _start_ai_camera_worker(self):
-        usb_camera_config = config.LOCAL_CAMERAS["CAM03"]
-        configured_model = getattr(
-            config,
-            "EDGE_MODEL_PATH",
-            None,
+        configured_model = getattr(config, "EDGE_MODEL_PATH", None)
+        edge_dir = Path(__file__).resolve().parents[1] / "Edge"
+        ncnn_path = edge_dir / "yolov8n_ncnn_model"
+        model_path = Path(configured_model) if configured_model else (
+            ncnn_path if ncnn_path.exists() else edge_dir / "yolov8n.pt"
         )
-
-        if configured_model:
-            model_path = Path(configured_model)
-        else:
-            model_path = (
-                Path(__file__).resolve().parents[1]
-                / "Edge"
-                / "yolov8n.pt"
-            )
-
         if not model_path.exists():
-            self._on_ai_camera_error(
-                f"Không tìm thấy model: {model_path}"
-            )
+            self._on_ai_camera_error(f"Không tìm thấy model: {model_path}")
             return
-        self.ai_camera_worker = AICameraWorker(
-            source_id="CAM03",
-            bandwidth_interval_sec=(config.BANDWIDTH_POLL_INTERVAL_SEC),
-            jpeg_quality=usb_camera_config.get("jpeg_quality", 80),
-            camera_index=usb_camera_config[
-                "device"
-            ],
+
+        self._stop_ai_workers()
+        self.ai_camera_workers = {}
+        self._active_ai_cameras = set()
+        self._ai_observations_by_camera = {}
+
+        enabled_cam_ids = [
+            cam_id
+            for cam_id, cam_cfg in config.LOCAL_CAMERAS.items()
+            if cam_cfg.get("enabled", True)
+        ]
+        if not enabled_cam_ids:
+            return
+
+        self.shared_yolo_worker = SharedYOLOInferenceWorker(
             model_path=str(model_path),
-            confidence=getattr(
-                config,
-                "AI_CONFIDENCE",
-                0.5,
-            ),
-            v4l2=usb_camera_config.get(
-                "v4l2",
-                True,
-            ),
+            confidence=getattr(config, "AI_CONFIDENCE", 0.5),
+            threads=getattr(config, "AI_THREADS", 2),
+            camera_order=tuple(enabled_cam_ids),
         )
+        self.shared_yolo_worker.observation_signal.connect(self._on_ai_observation)
+        self.shared_yolo_worker.error_signal.connect(
+            lambda src, msg: self._on_ai_camera_error(msg, src)
+        )
+        self.shared_yolo_worker.start()
 
-        self.ai_camera_worker.frame_signal.connect(
-            self._on_real_camera_frame
-        )
+        for cam_id, cam_cfg in config.LOCAL_CAMERAS.items():
+            if not cam_cfg.get("enabled", True):
+                continue
+            worker = AICameraWorker(
+                source_id=cam_id,
+                source=cam_cfg.get("source", "usb"),
+                bandwidth_interval_sec=config.BANDWIDTH_POLL_INTERVAL_SEC,
+                jpeg_quality=cam_cfg.get("jpeg_quality", 80),
+                camera_index=int(cam_cfg.get("device", 0)),
+                model_path=str(model_path),
+                confidence=getattr(config, "AI_CONFIDENCE", 0.5),
+                v4l2=cam_cfg.get("v4l2", False),
+                shared_yolo_worker=self.shared_yolo_worker,
+                max_box_age_sec=getattr(config, "AI_MAX_BOX_AGE_SEC", 2.0),
+                active_recheck_sec=getattr(config, "AI_ACTIVE_RECHECK_SEC", 0.8),
+                idle_recheck_sec=getattr(config, "AI_IDLE_RECHECK_SEC", 1.5),
+            )
+            worker.frame_packet_signal.connect(self._on_real_camera_frame_packet)
+            worker.observation_signal.connect(self._on_ai_observation)
+            worker.error_signal.connect(
+                lambda msg, cid=cam_id: self._on_ai_camera_error(msg, cid)
+            )
+            worker.status_signal.connect(
+                lambda status, cid=cam_id: self._on_ai_camera_status(status, cid)
+            )
+            worker.bandwidth_signal.connect(self._on_local_camera_bandwidth)
+            worker.start()
+            self.ai_camera_workers[cam_id] = worker
+            if cam_id == "CAM03":
+                self.ai_camera_worker = worker
 
-        self.ai_camera_worker.observation_signal.connect(
-            self._on_ai_observation
-        )
-
-        self.ai_camera_worker.error_signal.connect(
-            self._on_ai_camera_error
-        )
-        self.ai_camera_worker.status_signal.connect(
-            self._on_ai_camera_status
-        )
-        self.ai_camera_worker.bandwidth_signal.connect(
-            self._on_local_camera_bandwidth
-        )
-        self.ai_camera_worker.start()
-
-    def _on_ai_camera_error(self, message: str):
-        self._ai_available = False
-        self.lbl_status.setText(f"CAM03/CAM04 error: {message}")
-        self.lbl_status.setStyleSheet("color: #ff5252; padding: 6px;")
-        self._on_local_camera_bandwidth_error("CAM03", message)
-        self._latest_person_detected = False
-        self._latest_ai_observation_at = None
+    def _on_ai_camera_error(self, message: str, source_id: str = "CAM03"):
+        active_cams = getattr(self, "_active_ai_cameras", set())
+        active_cams.discard(source_id)
+        obs_map = getattr(self, "_ai_observations_by_camera", None)
+        if obs_map is not None:
+            obs_map.pop(source_id, None)
+        worker = getattr(self, "ai_camera_workers", {}).get(source_id)
+        if worker is not None and getattr(worker, "_camera_ref", None) is not None:
+            worker._camera_ref.clear_ai_state()
+        if self.shared_yolo_worker is not None:
+            self.shared_yolo_worker.unregister_camera(source_id)
+        if source_id in config.LOCAL_CAMERAS:
+            self._on_local_camera_bandwidth_error(source_id, message)
+        if not active_cams:
+            self._ai_available = False
+            self.lbl_status.setText(f"{source_id} error: {message}")
+            self.lbl_status.setStyleSheet("color: #ff5252; padding: 6px;")
+            self._latest_person_detected = False
+            self._latest_ai_observation_at = None
 
         self.log_console(
-            f"[EDGE AI ERROR] {message}",
+            f"[EDGE AI ERROR][{source_id}] {message}",
             alert=True,
         )
 
-    def _on_ai_camera_status(self, status: str):
-        self._ai_available = status == "RUNNING"
-
+    def _on_ai_camera_status(self, status: str, source_id: str = "CAM03"):
+        active_cams = getattr(self, "_active_ai_cameras", set())
         if status == "RUNNING":
+            active_cams.add(source_id)
+            self._active_ai_cameras = active_cams
+            self._ai_available = True
+            cams_txt = ", ".join(sorted(active_cams))
             self.lbl_status.setText(
-                "CAM03/CAM04: Đã khởi tạo — sẵn sàng nhận diện")
+                f"{cams_txt}: Đã khởi tạo — sẵn sàng nhận diện"
+            )
             self.lbl_status.setStyleSheet("color: #00e676; padding: 6px;")
-            self.log_console("[EDGE AI] Camera và model đã sẵn sàng.")
+            self.log_console(f"[EDGE AI][{source_id}] Camera và model đã sẵn sàng.")
         elif status == "ERROR":
-            self.log_console("[EDGE AI] Camera/model gặp lỗi.", alert=True,)
-
+            active_cams.discard(source_id)
+            obs_map = getattr(self, "_ai_observations_by_camera", None)
+            if obs_map is not None:
+                obs_map.pop(source_id, None)
+            self.log_console(f"[EDGE AI][{source_id}] Camera/model gặp lỗi.", alert=True)
         elif status == "STOPPED":
-            self._latest_person_detected = False
-            self._latest_ai_observation_at = None
+            active_cams.discard(source_id)
+            obs_map = getattr(self, "_ai_observations_by_camera", None)
+            if obs_map is not None:
+                obs_map.pop(source_id, None)
+            if not active_cams:
+                self._ai_available = False
+                self._latest_person_detected = False
+                self._latest_ai_observation_at = None
+
+

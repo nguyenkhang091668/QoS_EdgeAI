@@ -23,51 +23,139 @@ else:
     from layer5_ai import Detector
 
 
+import copy
+import threading
+
+
 class Pipeline:
-    def __init__(self, detector, cooldown=2., clock=time.monotonic):
+    def __init__(
+        self,
+        detector,
+        cooldown=2.,
+        clock=time.monotonic,
+        *,
+        max_box_age_sec=2.0,
+        active_recheck_sec=0.8,
+        idle_recheck_sec=1.5,
+    ):
         self.detector = detector
         self.machine = MayTrangThai_Cell4(cooldown=cooldown, clock=clock)
         self.previous = None
         self.last_ai = None
         self.last_ai_time = None
+        self.last_ai_frame_id = None
+        self.last_ai_captured_at = None
         self.clock = clock
         self.inference_interval_sec = 0.5
+        self.max_box_age_sec = max_box_age_sec
+        self.active_recheck_sec = active_recheck_sec
+        self.idle_recheck_sec = idle_recheck_sec
+        self._ai_lock = threading.Lock()
+        self._last_check_requested_at = self.clock()
+
+    def apply_ai_result(self, ai_result, *, frame_id=None, captured_at=None, inferred_at=None):
+        """Cập nhật kết quả AI bất đồng bộ an toàn luồng (chỉ nhận nếu frame_id mới hơn)."""
+        now = self.clock() if inferred_at is None else inferred_at
+        with self._ai_lock:
+            if (
+                frame_id is not None
+                and self.last_ai_frame_id is not None
+                and frame_id < self.last_ai_frame_id
+            ):
+                return False
+            self.last_ai = copy.deepcopy(ai_result) if ai_result is not None else None
+            self.last_ai_time = now if ai_result is not None else None
+            self.last_ai_frame_id = frame_id
+            self.last_ai_captured_at = captured_at
+            return True
+
+    def clear_ai_state(self):
+        """Xóa ngay bounding box và trạng thái AI khi lỗi hoặc dừng camera."""
+        with self._ai_lock:
+            self.last_ai = None
+            self.last_ai_time = None
+            self.last_ai_frame_id = None
+            self.last_ai_captured_at = None
 
     def step(self, frame):
         frame = normalize_frame(frame)
+        now = self.clock()
 
         # Xử lý motion trên ảnh chưa vẽ bounding box.
         result = process_layer3(self.previous, frame)
-        self.previous = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY,)
-        contours, _ = cv2.findContours(result["roi_mask"],cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE,)
-        result["roi_motion"] = (result["valid"] and any(cv2.contourArea(contour) >= 40 for contour in contours))
+        self.previous = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        contours, _ = cv2.findContours(
+            result["roi_mask"], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        result["roi_motion"] = (
+            result["valid"] and any(cv2.contourArea(contour) >= 40 for contour in contours)
+        )
         result["triggered"] = self.machine.update(result["roi_motion"])
-
-        now = self.clock()
-        due = (self.last_ai_time is None or now - self.last_ai_time >= self.inference_interval_sec)
-
         result["inferred"] = False
 
-        if self.detector is not None and (result["triggered"] or due):
-            self.last_ai = self.detector.infer(result["roi"])
-            self.last_ai_time = self.clock()
+        if self.detector is not None and result["triggered"]:
+            inferred_ai = self.detector.infer(result["roi"])
+            now = self.clock()
+            with self._ai_lock:
+                self.last_ai = inferred_ai
+                self.last_ai_time = now
+            self._last_check_requested_at = now
             result["inferred"] = True
 
-        result["ai_enabled"] = self.detector is not None
-        result["ai"] = self.last_ai
-        result["ai_age"] = (
-            None
-            if self.last_ai_time is None
-            else self.clock() - self.last_ai_time
+        with self._ai_lock:
+            last_ai = copy.deepcopy(self.last_ai) if self.last_ai is not None else None
+            last_ai_time = self.last_ai_time
+            last_ai_frame_id = self.last_ai_frame_id
+
+        has_person = bool(
+            last_ai
+            and (
+                last_ai.get("persons")
+                or (last_ai.get("detected") and last_ai.get("class_id", -1) == 0)
+            )
         )
+        recheck_interval = (
+            self.active_recheck_sec if has_person else self.idle_recheck_sec
+        )
+        periodic_due = (
+            recheck_interval is not None
+            and (now - self._last_check_requested_at) >= recheck_interval
+        )
+        should_infer = bool(result["triggered"] or periodic_due)
+        if result["triggered"]:
+            infer_reason = "motion_trigger"
+        elif periodic_due:
+            infer_reason = "periodic_person" if has_person else "periodic_idle"
+        else:
+            infer_reason = None
+
+        if should_infer:
+            self._last_check_requested_at = now
+
+        ai_age = None if last_ai_time is None else max(0.0, now - last_ai_time)
+        box_expired = (
+            ai_age is not None
+            and self.max_box_age_sec is not None
+            and ai_age > self.max_box_age_sec
+        )
+
+        result["ai_enabled"] = self.detector is not None
+        result["ai"] = last_ai
+        result["ai_age"] = ai_age
+        result["ai_frame_id"] = last_ai_frame_id
+        result["periodic_due"] = periodic_due
+        result["should_infer"] = should_infer
+        result["infer_reason"] = infer_reason
+        result["box_expired"] = box_expired
 
         # Chỉ vẽ trên bản sao dùng để hiển thị.
         display = frame.copy()
 
-        cv2.rectangle(display,(150, 100),(449, 399),(0, 255, 255),1)
+        cv2.rectangle(display, (150, 100), (449, 399), (0, 255, 255), 1)
 
-        if self.last_ai is not None:
-            for person in self.last_ai.get("persons", []):
+        # Quản lý tuổi bounding box: chỉ vẽ khi kết quả còn hạn và có người
+        if last_ai is not None and not box_expired:
+            for person in last_ai.get("persons", []):
                 x1, y1, x2, y2 = person["xyxy"]
 
                 # Box thuộc ROI: cộng offset để vẽ lên toàn frame.
@@ -81,9 +169,17 @@ class Pipeline:
                 y1 = max(0, min(479, y1))
                 y2 = max(0, min(479, y2))
 
-                cv2.rectangle(display,(x1, y1),(x2, y2),(0, 255, 0),2)
+                cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 text = f"PERSON {person['score']:.2f}"
-                cv2.putText(display, text, (x1, max(18, y1 - 6)),cv2.FONT_HERSHEY_SIMPLEX,0.5,(0, 255, 0),1,)
+                cv2.putText(
+                    display,
+                    text,
+                    (x1, max(18, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                )
 
         return display, result
 
