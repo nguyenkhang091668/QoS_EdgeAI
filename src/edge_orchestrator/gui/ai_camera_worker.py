@@ -144,6 +144,8 @@ class SharedYOLOInferenceWorker(QThread):
                     self.classes,
                     self.threads,
                 )
+                if hasattr(self._detector, "warmup"):
+                    self._detector.warmup()
             self.status_signal.emit("RUNNING")
 
             while True:
@@ -291,6 +293,8 @@ class AICameraWorker(QThread):
         self.max_frame_gap_ms = 0.0
         self.triggers_count = 0
         self.periodic_count = 0
+        self.latest_emitted_frame_id = 0
+        self.dropped_gui_frames = 0
 
     def get_diagnostics(self) -> dict:
         return {
@@ -299,6 +303,8 @@ class AICameraWorker(QThread):
             "max_frame_gap_ms": round(self.max_frame_gap_ms, 2),
             "triggers_count": self.triggers_count,
             "periodic_count": self.periodic_count,
+            "latest_emitted_frame_id": self.latest_emitted_frame_id,
+            "dropped_gui_frames": self.dropped_gui_frames,
         }
 
     def run(self):
@@ -333,6 +339,7 @@ class AICameraWorker(QThread):
             fps_window_start = time.monotonic()
             fps_window_frames = 0
             last_frame_mono = None
+            last_jpeg_size = 0
 
             while self._running:
                 packet = camera.read()
@@ -351,26 +358,26 @@ class AICameraWorker(QThread):
                     fps_window_frames = 0
                     fps_window_start = now_mono
 
-                if packet.frame_id % 5 == 1:
-                    encoded_frame = packet.jpeg(quality=self.jpeg_quality)
-                    measurement = meter.observe(len(encoded_frame) * 5)
-                    if measurement is not None:
-                        value_mbps, sampled_at = measurement
-                        self.bandwidth_signal.emit(
-                            self.source_id,
-                            value_mbps,
-                            sampled_at,
-                        )
+                if last_jpeg_size == 0 or packet.frame_id % 15 == 1:
+                    last_jpeg_size = len(packet.jpeg(quality=self.jpeg_quality))
+                measurement = meter.observe(last_jpeg_size)
+                if measurement is not None:
+                    value_mbps, sampled_at = measurement
+                    self.bandwidth_signal.emit(
+                        self.source_id,
+                        value_mbps,
+                        sampled_at,
+                    )
 
                 # Gửi frame kèm định danh (source_id, frame_id, captured_at) cho GUI ngay lập tức.
-                frame_copy = packet.frame.copy()
+                self.latest_emitted_frame_id = packet.frame_id
                 self.frame_packet_signal.emit(
                     self.source_id,
                     packet.frame_id,
                     packet.captured_at,
-                    frame_copy,
+                    packet.frame,
                 )
-                self.frame_signal.emit(frame_copy)
+                self.frame_signal.emit(packet.frame)
 
                 if use_async_yolo:
                     meta = packet.metadata
@@ -424,4 +431,3 @@ class AICameraWorker(QThread):
         if self.isRunning():
             return bool(self.wait(timeout_ms))
         return True
-

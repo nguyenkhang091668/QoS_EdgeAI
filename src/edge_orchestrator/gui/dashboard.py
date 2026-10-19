@@ -274,7 +274,8 @@ class MainDashboard(QWidget):
             cam_row.addWidget(lbl, stretch=1)
         self.lbl_camera = self.lbl_cam03
 
-        self.lbl_status = QLabel("CAM03 & CAM04: đang khởi tạo camera và model...")
+        self.lbl_status = QLabel(
+            "CAM03 & CAM04: đang khởi tạo camera và model...")
         self.lbl_status.setFont(QFont("Consolas", 11, QFont.Bold))
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setStyleSheet("color: #ffca28; padding: 6px;")
@@ -329,7 +330,7 @@ class MainDashboard(QWidget):
 
         lay3.addWidget(self.txt_console, stretch=1)
         lay3.addLayout(btn_row)
-                # ── KHUNG 4: Tình trạng Online của Cổng & Thiết bị ────────────────────
+        # ── KHUNG 4: Tình trạng Online của Cổng & Thiết bị ────────────────────
         g4 = QGroupBox(
             " KHUNG 4: TÌNH TRẠNG ONLINE CÁC CỔNG & THIẾT BỊ — Device & Port Status"
         )
@@ -415,7 +416,8 @@ class MainDashboard(QWidget):
             info = snapshot.get(source_id, {})
             status_enum = info.get("status", CollectorStatus.WARMING_UP)
             sample = info.get("sample")
-            status_text = status_enum.value if hasattr(status_enum, "value") else str(status_enum)
+            status_text = status_enum.value if hasattr(
+                status_enum, "value") else str(status_enum)
 
             # Xác định màu sắc theo trạng thái
             if status_text in ("ONLINE", "STREAMING", "RUNNING"):
@@ -423,7 +425,8 @@ class MainDashboard(QWidget):
             elif status_text in ("WARMING_UP", "STALE", "NO_STREAM"):
                 color = QColor("#ffca28")  # Vàng
             else:
-                color = QColor("#ff5252")  # Đỏ (INTERFACE_DOWN, OFFLINE, COLLECTOR_ERROR)
+                # Đỏ (INTERFACE_DOWN, OFFLINE, COLLECTOR_ERROR)
+                color = QColor("#ff5252")
 
             # Chi tiết tốc độ / QoS / Loss
             detail_text = "—"
@@ -439,7 +442,8 @@ class MainDashboard(QWidget):
             # Nếu là nhánh WAN của R1/R2 thì ghép thêm trạng thái QoS Policy
             router_prefix = source_id.split("_")[0]
             if source_id in ("R1_WAN", "R2_WAN") and router_prefix in qos_snap:
-                applied = qos_snap[router_prefix].get("applied_policy") or self._desired_policy
+                applied = qos_snap[router_prefix].get(
+                    "applied_policy") or self._desired_policy
                 detail_text = f"{detail_text} | QoS:{applied}"
 
             # Chỉ cập nhật GUI khi text thay đổi để tiết kiệm CPU
@@ -448,7 +452,7 @@ class MainDashboard(QWidget):
                 items[2].setForeground(color)
             if items[3].text() != detail_text:
                 items[3].setText(detail_text)
-                
+
     def _connect_signals(self):
         bridge.log_signal.connect(self.log_console)
         bridge.qos_signal.connect(self._apply_network_policy)
@@ -739,12 +743,12 @@ class MainDashboard(QWidget):
     # ── TICK FUNCTIONS ────────────────────────────────────────────────────────
 
     def _tick_bandwidth(self):
-        """Vẽ lịch sử bandwidth thật từ BandwidthStore."""
+        """Vẽ lịch sử bandwidth thật từ BandwidthStore bằng kỹ thuật Blitting (<10ms trên Pi 4)."""
         now = time.time()
         snapshot = self.bandwidth_store.snapshot(now=now)
         status_signature = []
         maximum_value = 0.0
-        valid_statuses = {CollectorStatus.ONLINE, CollectorStatus.STREAMING, }
+        valid_statuses = {CollectorStatus.ONLINE, CollectorStatus.STREAMING}
         for source_id in BANDWIDTH_SOURCE_IDS:
             source_data = snapshot[source_id]
             status = source_data["status"]
@@ -760,13 +764,16 @@ class MainDashboard(QWidget):
                 maximum_value = max(maximum_value, max(finite_values))
             line = self.bandwidth_lines[source_id]
             line.set_data(x_values, y_values)
-            line.set_label(f"{source_id} [{status.value}]")
             status_signature.append((source_id, status.value))
-        self.ax.set_xlim(-config.BANDWIDTH_HISTORY_SEC, 0)
-        self.ax.set_ylim(0, max(10.0, maximum_value * 1.2))
+
         status_signature = tuple(status_signature)
-        if (status_signature != self._bandwidth_legend_signature):
-            self._bandwidth_legend_signature = (status_signature)
+        legend_changed = status_signature != self._bandwidth_legend_signature
+        if legend_changed:
+            self._bandwidth_legend_signature = status_signature
+            for source_id, status_val in status_signature:
+                self.bandwidth_lines[source_id].set_label(
+                    f"{source_id} [{status_val}]"
+                )
             self.ax.legend(
                 loc="upper left",
                 fontsize=6,
@@ -775,8 +782,45 @@ class MainDashboard(QWidget):
                 labelcolor="white",
                 framealpha=0.8,
             )
-        self.canvas.draw_idle()
+
+        target_ymax = max(10.0, round(maximum_value * 1.2, 1))
+        current_ylim = self.ax.get_ylim()
+        ylim_changed = abs(current_ylim[1] - target_ymax) > 0.5
+        if ylim_changed:
+            self.ax.set_ylim(0, target_ymax)
+
+        canvas_size = (self.canvas.width(), self.canvas.height())
+        bg_cache = getattr(self, "_bw_bg_cache", None)
+        cached_size = getattr(self, "_bw_canvas_size", None)
+
+        try:
+            if (
+                bg_cache is None
+                or cached_size != canvas_size
+                or legend_changed
+                or ylim_changed
+            ):
+                for line in self.bandwidth_lines.values():
+                    line.set_visible(False)
+                self.canvas.draw()
+                bg_cache = self.canvas.copy_from_bbox(self.ax.bbox)
+                self._bw_bg_cache = bg_cache
+                self._bw_canvas_size = canvas_size
+                for line in self.bandwidth_lines.values():
+                    line.set_visible(True)
+
+            self.canvas.restore_region(bg_cache)
+            for line in self.bandwidth_lines.values():
+                self.ax.draw_artist(line)
+            legend = self.ax.get_legend()
+            if legend is not None:
+                self.ax.draw_artist(legend)
+            self.canvas.blit(self.ax.bbox)
+        except Exception:
+            self.canvas.draw_idle()
+
         self._update_device_status_table(snapshot)
+
     def _tick_ai(self):
         if self.simulate_ai:
             probability = getattr(
@@ -857,18 +901,21 @@ class MainDashboard(QWidget):
                     "timestamp",
                     "??:??:??",
                 )
-                device = event.get("device_name") or event.get("source_ip", "UNKOWN") 
+                device = event.get("device_name") or event.get(
+                    "source_ip", "UNKOWN")
                 self._device_last_syslog[device] = f"{event_type}"
                 if event_type == EventType.PORT_SECURITY_VIOLATION:
                     mac = data.get("mac")
                     interface = data.get("interface", "?")
-                    self.log_console(f"[{timestamp}] [{device}] PORT SECURITY VIOLATION | MAC: {mac or '?'} | Port: {interface}", alert=True )
+                    self.log_console(
+                        f"[{timestamp}] [{device}] PORT SECURITY VIOLATION | MAC: {mac or '?'} | Port: {interface}", alert=True)
                 elif event_type == EventType.DAI_ARP_SPOOFING_DENY:
                     attacker_ip = data.get("src_ip")
                     attacker_mac = data.get("src_mac")
                     interface = data.get("interface", "?")
 
-                    self.log_console(f"[{timestamp}] [{device}] DAI ARP SPOOFING | IP: {attacker_ip or '?'} | MAC: {attacker_mac or '?'} | Port: {interface}", alert=True)
+                    self.log_console(
+                        f"[{timestamp}] [{device}] DAI ARP SPOOFING | IP: {attacker_ip or '?'} | MAC: {attacker_mac or '?'} | Port: {interface}", alert=True)
 
                     if attacker_ip:
                         self._run_acl_remediation(
@@ -883,13 +930,15 @@ class MainDashboard(QWidget):
                         )
 
                 elif event_type == EventType.INTERFACE_LINK_CHANGE:
-                    state = data.get("state","unknown").upper()
-                    interface = data.get("interface","?")
-                    self.log_console(f"[{timestamp}] [{device}] Interface {interface}: {state}", alert=(state == "DOWN"))
+                    state = data.get("state", "unknown").upper()
+                    interface = data.get("interface", "?")
+                    self.log_console(
+                        f"[{timestamp}] [{device}] Interface {interface}: {state}", alert=(state == "DOWN"))
                 else:
                     raw = event.get("raw", "")
                     details = event.get("details", raw)
-                    self.log_console(f"[{timestamp}] [{device}] {event_type}: {details[:120]}")
+                    self.log_console(
+                        f"[{timestamp}] [{device}] {event_type}: {details[:120]}")
 
         except queue.Empty:
             pass
@@ -1177,8 +1226,10 @@ class MainDashboard(QWidget):
     ):
         if category == "Hệ thống" and text.startswith("[DYNAMIC QOS]"):
             category = "Dynamic QoS"
-        entry = self.audit_log_store.append(message=text, category=category, alert=alert)
+        entry = self.audit_log_store.append(
+            message=text, category=category, alert=alert)
         self._append_log_entry(entry)
+
     def _append_log_entry(self, entry):
         color = "#ff5252" if entry.alert else "#00e676"
         timestamp = escape(entry.timestamp)
@@ -1191,15 +1242,37 @@ class MainDashboard(QWidget):
         )
         scrollbar = self.txt_console.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
     def _on_real_camera_frame(self, frame, source_id="CAM03"):
         if frame is None:
             return
 
+        target_label = (
+            getattr(self, "lbl_cam04", self.lbl_camera)
+            if source_id == "CAM04"
+            else getattr(self, "lbl_cam03", self.lbl_camera)
+        )
+        src_h, src_w = frame.shape[:2]
+        lbl_w = max(1, target_label.width())
+        lbl_h = max(1, target_label.height())
+
+        # Co giãn bằng OpenCV trước khi đổi hệ màu & tạo QPixmap để giảm 4x số điểm ảnh xử lý trên Main Thread
+        scale = min(lbl_w / float(src_w), lbl_h / float(src_h))
+        if 0.05 < scale < 0.98:
+            dst_w = max(1, int(src_w * scale))
+            dst_h = max(1, int(src_h * scale))
+            resized = cv2.resize(
+                frame,
+                (dst_w, dst_h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        else:
+            resized = frame
+
         rgb = cv2.cvtColor(
-            frame,
+            resized,
             cv2.COLOR_BGR2RGB,
         )
-
         height, width, channels = rgb.shape
         bytes_per_line = channels * width
 
@@ -1209,22 +1282,8 @@ class MainDashboard(QWidget):
             height,
             bytes_per_line,
             QImage.Format_RGB888,
-        ).copy()
-
-        pixmap = QPixmap.fromImage(image)
-        target_label = (
-            getattr(self, "lbl_cam04", self.lbl_camera)
-            if source_id == "CAM04"
-            else getattr(self, "lbl_cam03", self.lbl_camera)
         )
-        target_label.setPixmap(
-            pixmap.scaled(
-                target_label.width(),
-                target_label.height(),
-                Qt.KeepAspectRatio,
-                Qt.FastTransformation,
-            )
-        )
+        target_label.setPixmap(QPixmap.fromImage(image))
 
     def _on_real_camera_frame_packet(
         self,
@@ -1233,6 +1292,19 @@ class MainDashboard(QWidget):
         captured_at: float,
         frame,
     ):
+        # Cơ chế 1-Slot Latest-Frame: nếu trong hàng đợi Qt đã có frame mới hơn từ cùng camera thì bỏ qua ngay frame cũ
+        workers_map = getattr(self, "ai_camera_workers", None)
+        if workers_map:
+            worker = workers_map.get(source_id)
+            if (
+                worker is not None
+                and getattr(worker, "latest_emitted_frame_id", 0) > frame_id
+            ):
+                worker.dropped_gui_frames = (
+                    getattr(worker, "dropped_gui_frames", 0) + 1
+                )
+                return
+
         frame_meta = getattr(self, "_latest_frame_meta_by_camera", None)
         if frame_meta is None:
             frame_meta = {}
@@ -1262,7 +1334,8 @@ class MainDashboard(QWidget):
             or "CAM03"
         )
         frame_id = event.get("frame_id") if isinstance(event, dict) else None
-        captured_at = event.get("captured_at") if isinstance(event, dict) else None
+        captured_at = event.get("captured_at") if isinstance(
+            event, dict) else None
 
         prev = obs_map.get(cam_id)
         if (
@@ -1422,7 +1495,8 @@ class MainDashboard(QWidget):
             threads=getattr(config, "AI_THREADS", 2),
             camera_order=tuple(enabled_cam_ids),
         )
-        self.shared_yolo_worker.observation_signal.connect(self._on_ai_observation)
+        self.shared_yolo_worker.observation_signal.connect(
+            self._on_ai_observation)
         self.shared_yolo_worker.error_signal.connect(
             lambda src, msg: self._on_ai_camera_error(msg, src)
         )
@@ -1442,16 +1516,19 @@ class MainDashboard(QWidget):
                 v4l2=cam_cfg.get("v4l2", False),
                 shared_yolo_worker=self.shared_yolo_worker,
                 max_box_age_sec=getattr(config, "AI_MAX_BOX_AGE_SEC", 2.0),
-                active_recheck_sec=getattr(config, "AI_ACTIVE_RECHECK_SEC", 0.8),
+                active_recheck_sec=getattr(
+                    config, "AI_ACTIVE_RECHECK_SEC", 0.8),
                 idle_recheck_sec=getattr(config, "AI_IDLE_RECHECK_SEC", 1.5),
             )
-            worker.frame_packet_signal.connect(self._on_real_camera_frame_packet)
+            worker.frame_packet_signal.connect(
+                self._on_real_camera_frame_packet)
             worker.observation_signal.connect(self._on_ai_observation)
             worker.error_signal.connect(
                 lambda msg, cid=cam_id: self._on_ai_camera_error(msg, cid)
             )
             worker.status_signal.connect(
-                lambda status, cid=cam_id: self._on_ai_camera_status(status, cid)
+                lambda status, cid=cam_id: self._on_ai_camera_status(
+                    status, cid)
             )
             worker.bandwidth_signal.connect(self._on_local_camera_bandwidth)
             worker.start()
@@ -1492,16 +1569,17 @@ class MainDashboard(QWidget):
             self._ai_available = True
             cams_txt = ", ".join(sorted(active_cams))
             self.lbl_status.setText(
-                f"{cams_txt}: Đã khởi tạo — sẵn sàng nhận diện"
-            )
+                f"{cams_txt}: Đã khởi tạo — sẵn sàng nhận diện")
             self.lbl_status.setStyleSheet("color: #00e676; padding: 6px;")
-            self.log_console(f"[EDGE AI][{source_id}] Camera và model đã sẵn sàng.")
+            self.log_console(
+                f"[EDGE AI][{source_id}] Camera và model đã sẵn sàng.")
         elif status == "ERROR":
             active_cams.discard(source_id)
             obs_map = getattr(self, "_ai_observations_by_camera", None)
             if obs_map is not None:
                 obs_map.pop(source_id, None)
-            self.log_console(f"[EDGE AI][{source_id}] Camera/model gặp lỗi.", alert=True)
+            self.log_console(
+                f"[EDGE AI][{source_id}] Camera/model gặp lỗi.", alert=True)
         elif status == "STOPPED":
             active_cams.discard(source_id)
             obs_map = getattr(self, "_ai_observations_by_camera", None)
@@ -1511,5 +1589,3 @@ class MainDashboard(QWidget):
                 self._ai_available = False
                 self._latest_person_detected = False
                 self._latest_ai_observation_at = None
-
-

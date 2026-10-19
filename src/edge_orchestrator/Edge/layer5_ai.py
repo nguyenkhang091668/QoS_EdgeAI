@@ -75,6 +75,7 @@ class Detector:
             raise FileNotFoundError(f'Model not found: {path}')
         self.confidence = confidence
         self.classes = classes
+        self.threads = int(threads)
         if path.is_dir():
             self.backend = '.ncnn'
             required_files = (
@@ -110,6 +111,15 @@ class Detector:
             # Validate layout without invoking inference.
             class_scores(np.zeros(self.output['shape'], np.float32), classes)
         elif self.backend in ('.pt', '.ncnn'):
+            try:
+                cv2.setNumThreads(1)
+            except Exception:
+                pass
+            try:
+                import torch
+                torch.set_num_threads(self.threads)
+            except Exception:
+                pass
             from ultralytics import YOLO
             self.model = YOLO(
                 str(path),
@@ -119,6 +129,11 @@ class Detector:
                 raise ValueError('Detection model required')
         else:
             raise ValueError('Model must be .pt or .tflite or .ncnn')
+
+    def warmup(self):
+        """Khởi động trước (warm-up) đồ thị NCNN/PyTorch bằng 1 frame rỗng 300x300 để tránh khựng ở lần suy luận đầu tiên."""
+        dummy = np.zeros((300, 300, 3), dtype=np.uint8)
+        self.infer(dummy)
 
     def infer(self, roi):
         start = time.perf_counter()
