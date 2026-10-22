@@ -51,6 +51,8 @@ from edge_orchestrator.network.network_controller import (
     NetworkController,
 )
 from edge_orchestrator.network.qos_sync import RouterQoSSynchronizer
+from edge_orchestrator.network.telegram_alerts import CameraAlert, TelegramAlerts
+from edge_orchestrator.network.vrrp_status import read_active_router
 from edge_orchestrator.network.pysnmp_client import (
     PySnmpV3Client,
 )
@@ -201,9 +203,21 @@ class MainDashboard(QWidget):
         self.ai_camera_worker = None
         self.ai_camera_workers = {}
         self.shared_yolo_worker = None
+        self.telegram_alerts = TelegramAlerts(
+            config.TELEGRAM_BOT_TOKEN,
+            config.TELEGRAM_CHAT_ID,
+            log=bridge.log_signal.emit,
+            router_provider=(
+                (lambda: read_active_router(self.network_controllers))
+                if not self.simulate_netmiko else None
+            ),
+        )
         self.audit_log_store = AuditLogStore(1000)
         self._init_ui()
         self._connect_signals()
+        if not self.simulate_ai and not self.telegram_alerts.enabled:
+            self.log_console(
+                "[TELEGRAM] Chưa bật: cần TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID.")
         self._device_last_syslog = {}
         self._start_timers()
 
@@ -845,6 +859,7 @@ class MainDashboard(QWidget):
             self._on_ai_state_change(ai_state_change)
 
     def _on_ai_state_change(self, state: str):
+        previous_state = self._ai_state
         self._ai_state = state
 
         if state == "ALERT":
@@ -887,6 +902,39 @@ class MainDashboard(QWidget):
             return
 
         self._recalculate_target_policy()
+        if previous_state == "NORMAL" and state == "ALERT":
+            self._queue_telegram_alert()
+
+    def _queue_telegram_alert(self):
+        if self.simulate_ai or not self.telegram_alerts.enabled:
+            return
+        now = time.monotonic()
+        active_cameras = getattr(self, "_active_ai_cameras", None)
+        observations = [
+            item for cam, item in self._ai_observations_by_camera.items()
+            if (not active_cameras or cam in active_cameras)
+            and item.get("person_detected")
+            and now - item["observed_at"] <= config.AI_OBSERVATION_TTL_SEC
+        ]
+        if not observations:
+            self.log_console("[TELEGRAM] No fresh camera observation for ALERT.", alert=True)
+            return
+        # One system transition -> one notification; use the newest positive observation.
+        observation = max(observations, key=lambda item: item["observed_at"])
+        event = observation["event"]
+        camera = observation["source_id"]
+        people = len(event.get("persons") or [])
+        if not people and event.get("detected") and event.get("class_id") == 0:
+            people = 1
+        self.telegram_alerts.submit(CameraAlert(
+            camera=camera,
+            location=config.CAMERA_LOCATIONS.get(camera, "Chưa cấu hình"),
+            people=people,
+            occurred_at=time.time(),
+            photo=event.get("alert_photo", b""),
+            qos_mbps=config.QOS_ALERT_BW_MBPS,
+            active_router="Chưa xác định",
+        ))
 
     def _tick_syslog(self):
         try:
@@ -1427,6 +1475,7 @@ class MainDashboard(QWidget):
 
     def closeEvent(self, event):
         self._qos_closing = True
+        self.telegram_alerts.close()
         if hasattr(self, "timer_qos"):
             self.timer_qos.stop()
         self.qos_sync.close(timeout_sec=1.0)

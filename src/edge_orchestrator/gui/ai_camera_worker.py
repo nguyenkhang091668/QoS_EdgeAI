@@ -23,6 +23,7 @@ class PendingROIJob:
     submitted_at: float
     roi: np.ndarray
     reason: str = "motion_trigger"
+    full_frame: Optional[np.ndarray] = None
 
 
 class SharedYOLOInferenceWorker(QThread):
@@ -218,6 +219,11 @@ class SharedYOLOInferenceWorker(QThread):
                     "overwritten_slots": overwritten,
                     **copy.deepcopy(ai_result),
                 }
+                if person_detected:
+                    photo_frame = job.full_frame if job.full_frame is not None else job.roi
+                    ok, encoded = cv2.imencode(".jpg", photo_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if ok:
+                        event["alert_photo"] = encoded.tobytes()
                 self.observation_signal.emit(person_detected, event)
 
         except Exception as error:
@@ -395,16 +401,22 @@ class AICameraWorker(QThread):
                                 submitted_at=now_mono,
                                 roi=packet.roi.copy(),
                                 reason=reason,
+                                full_frame=packet.frame.copy(),
                             )
                         )
                 elif packet.event is not None:
-                    event = packet.event
+                    event = dict(packet.event)
                     persons = event.get("persons", [])
                     object_detected = bool(event.get("detected", False))
                     class_id = event.get("class_id", -1)
                     person_detected = bool(
                         persons or (object_detected and class_id == 0)
                     )
+                    event["source_id"] = self.source_id
+                    if person_detected:
+                        ok, encoded = cv2.imencode(".jpg", packet.frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        if ok:
+                            event["alert_photo"] = encoded.tobytes()
                     self.observation_signal.emit(
                         person_detected,
                         event,
