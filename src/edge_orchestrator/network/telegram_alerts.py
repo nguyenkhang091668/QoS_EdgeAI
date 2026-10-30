@@ -23,7 +23,7 @@ class CameraAlert:
     def caption(self):
         timestamp = datetime.fromtimestamp(self.occurred_at, VIETNAM)
         return (
-            f"🚨 {self.camera}\nLocation: {self.location}\n"
+            f"{self.camera}\nLocation: {self.location}\n"
             f"People: {self.people}\nState: NORMAL → ALERT\n"
             f"QoS profile: {self.qos_mbps:g} Mbps (requested)\n"
             f"Active router: {self.active_router}\n"
