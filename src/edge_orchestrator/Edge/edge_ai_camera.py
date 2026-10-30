@@ -198,7 +198,7 @@ class EdgeAICamera:
             raise ValueError('Expected non-empty HxWx3 BGR frame')
         self._initialize()
         try:
-            processed, result = self._pipeline.step(frame.copy())
+            processed, result = self._pipeline.step(frame)
         except Exception:
             # Failed inference must not leave stale FSM/AI data on a retry.
             self._pipeline = None
@@ -215,7 +215,11 @@ class EdgeAICamera:
                 "captured_at": captured_at,
                 **copy.deepcopy(result["ai"]),
             }
-        metadata = {k: copy.deepcopy(v) for k, v in result.items() if not isinstance(v, np.ndarray)}
+        metadata = {
+            k: (copy.deepcopy(v) if isinstance(v, (dict, list)) else v)
+            for k, v in result.items()
+            if not isinstance(v, np.ndarray)
+        }
         metadata.update(
             source_id=self.source_id,
             frame_id=self._frame_id,
@@ -227,10 +231,10 @@ class EdgeAICamera:
         return CameraPacket(
             self._frame_id,
             captured_at,
-            processed.copy(),
+            processed,
             result['roi'].copy(),
-            result['clean'].copy(),
-            result['roi_mask'].copy(),
+            result['clean'],
+            result['roi_mask'],
             metadata,
             event,
             source_id=self.source_id,

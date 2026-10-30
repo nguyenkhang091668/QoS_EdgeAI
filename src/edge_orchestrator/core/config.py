@@ -340,3 +340,12 @@ QOS_THRESHOLD_BW_MIN = 0.5     # Băng thông rớt dưới 0.5 Mbps
 # Debounce để tránh Flapping (thay đổi trạng thái liên tục)
 QOS_DEGRADE_TRIGGER_SEC = 3    # Mạng suy thoái liên tục 3s -> Kích hoạt DEGRADED
 QOS_RECOVER_TRIGGER_SEC = 10   # Mạng ổn định liên tục 10s -> Kích hoạt NORMAL
+
+
+# Telegram photo alerts (disabled until both credentials are configured).
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+CAMERA_LOCATIONS = {
+    "CAM03": "Kho tài liệu bảo mật tầng 8",
+    "CAM04": os.environ.get("CAM04_LOCATION", "Chưa cấu hình"),
+}

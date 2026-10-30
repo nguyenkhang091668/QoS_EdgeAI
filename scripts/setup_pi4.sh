@@ -13,6 +13,8 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 INSTALL_USER="${SUDO_USER:-$(id -un)}"
 INSTALL_GROUP="$(id -gn "$INSTALL_USER")"
+INSTALL_HOME="$(getent passwd "$INSTALL_USER" | cut -d: -f6)"
+GLIB_RUNTIME_PACKAGE="$(bash "$PROJECT_DIR/scripts/select_glib_package.sh")"
 
 echo ""
 echo -e "${CYAN}============================================================${NC}"
@@ -34,7 +36,7 @@ sudo apt-get install -y \
     libopenblas-dev libopenjp2-7 libtiff6 \
     libavcodec-dev libavformat-dev libswscale-dev \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libgl1 libglib2.0-0t64 \
+    libgl1 "$GLIB_RUNTIME_PACKAGE" \
     iperf3 \
     net-tools curl wget git
 echo -e "${GREEN}  ✓ System dependencies cài xong${NC}"
@@ -94,12 +96,16 @@ Wants=network-online.target
 User=${INSTALL_USER}
 Group=${INSTALL_GROUP}
 WorkingDirectory=${PROJECT_DIR}
+EnvironmentFile=-${INSTALL_HOME}/.config/qos-edgeai/snmp.env
+EnvironmentFile=-${INSTALL_HOME}/.config/qos-edgeai/ssh.env
+EnvironmentFile=-${INSTALL_HOME}/.env.telegram
+EnvironmentFile=-${PROJECT_DIR}/.env.telegram
 Environment="DISPLAY=:0"
 Environment="PYTHONPATH=${PROJECT_DIR}/src"
 Environment="EDGE_MODEL_PATH=${PROJECT_DIR}/src/edge_orchestrator/Edge/yolov8n_ncnn_model"
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ExecStart=${VENV_DIR}/bin/python -m edge_orchestrator.main --gns3 --no-sim
+ExecStart=${VENV_DIR}/bin/python -X faulthandler -u -m edge_orchestrator.main --gns3 --no-sim --port 5514
 Restart=on-failure
 RestartSec=10
 
@@ -111,7 +117,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable datn-orchestrator.service
 echo -e "${GREEN}  ✓ Systemd service đã tạo và enable${NC}"
 
-# ─── B 9ƯỚC Triền kse) ─────────────────────────
+# ─── BƯỚC 9: Xác nhận chế độ triển khai thật ───────────────────────────
 echo -e "${YELLOW}[BƯỚC 9/9] Xác nhận chế độ triển khai thật...${NC}"
 echo -e "${GREEN}  ✓ AI, Netmiko và Syslog thật được bật bằng --gns3 --no-sim${NC}"
 echo -e "${GREEN}  ✓ Model NCNN được truyền bằng EDGE_MODEL_PATH${NC}"

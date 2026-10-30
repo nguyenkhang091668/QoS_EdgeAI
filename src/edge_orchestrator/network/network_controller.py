@@ -6,6 +6,7 @@ import re
 import threading
 
 from edge_orchestrator.network.qos_sync import PolicySyncResult
+from edge_orchestrator.network.vrrp_status import parse_vrrp_brief
 
 try:
     from netmiko import ConnectHandler
@@ -130,6 +131,12 @@ class NetworkController:
         except Exception as error:
             print(f"[NETMIKO] {self.target_name}: gửi cấu hình thất bại: {error}")
             return False
+
+    def read_vrrp_roles(self):
+        """Read-only query; the notifier calls this outside the GUI thread."""
+        with self._session() as connection:
+            output = connection.send_command("show vrrp brief", read_timeout=10)
+        return parse_vrrp_brief(output)
 
     def test_ssh_connection(self):
         try:

@@ -23,6 +23,7 @@ class PendingROIJob:
     submitted_at: float
     roi: np.ndarray
     reason: str = "motion_trigger"
+    full_frame: Optional[np.ndarray] = None
 
 
 class SharedYOLOInferenceWorker(QThread):
@@ -144,6 +145,8 @@ class SharedYOLOInferenceWorker(QThread):
                     self.classes,
                     self.threads,
                 )
+                if hasattr(self._detector, "warmup"):
+                    self._detector.warmup()
             self.status_signal.emit("RUNNING")
 
             while True:
@@ -216,6 +219,11 @@ class SharedYOLOInferenceWorker(QThread):
                     "overwritten_slots": overwritten,
                     **copy.deepcopy(ai_result),
                 }
+                if person_detected:
+                    photo_frame = job.full_frame if job.full_frame is not None else job.roi
+                    ok, encoded = cv2.imencode(".jpg", photo_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if ok:
+                        event["alert_photo"] = encoded.tobytes()
                 self.observation_signal.emit(person_detected, event)
 
         except Exception as error:
@@ -291,6 +299,8 @@ class AICameraWorker(QThread):
         self.max_frame_gap_ms = 0.0
         self.triggers_count = 0
         self.periodic_count = 0
+        self.latest_emitted_frame_id = 0
+        self.dropped_gui_frames = 0
 
     def get_diagnostics(self) -> dict:
         return {
@@ -299,6 +309,8 @@ class AICameraWorker(QThread):
             "max_frame_gap_ms": round(self.max_frame_gap_ms, 2),
             "triggers_count": self.triggers_count,
             "periodic_count": self.periodic_count,
+            "latest_emitted_frame_id": self.latest_emitted_frame_id,
+            "dropped_gui_frames": self.dropped_gui_frames,
         }
 
     def run(self):
@@ -333,6 +345,7 @@ class AICameraWorker(QThread):
             fps_window_start = time.monotonic()
             fps_window_frames = 0
             last_frame_mono = None
+            last_jpeg_size = 0
 
             while self._running:
                 packet = camera.read()
@@ -351,26 +364,26 @@ class AICameraWorker(QThread):
                     fps_window_frames = 0
                     fps_window_start = now_mono
 
-                if packet.frame_id % 5 == 1:
-                    encoded_frame = packet.jpeg(quality=self.jpeg_quality)
-                    measurement = meter.observe(len(encoded_frame) * 5)
-                    if measurement is not None:
-                        value_mbps, sampled_at = measurement
-                        self.bandwidth_signal.emit(
-                            self.source_id,
-                            value_mbps,
-                            sampled_at,
-                        )
+                if last_jpeg_size == 0 or packet.frame_id % 15 == 1:
+                    last_jpeg_size = len(packet.jpeg(quality=self.jpeg_quality))
+                measurement = meter.observe(last_jpeg_size)
+                if measurement is not None:
+                    value_mbps, sampled_at = measurement
+                    self.bandwidth_signal.emit(
+                        self.source_id,
+                        value_mbps,
+                        sampled_at,
+                    )
 
                 # Gửi frame kèm định danh (source_id, frame_id, captured_at) cho GUI ngay lập tức.
-                frame_copy = packet.frame.copy()
+                self.latest_emitted_frame_id = packet.frame_id
                 self.frame_packet_signal.emit(
                     self.source_id,
                     packet.frame_id,
                     packet.captured_at,
-                    frame_copy,
+                    packet.frame,
                 )
-                self.frame_signal.emit(frame_copy)
+                self.frame_signal.emit(packet.frame)
 
                 if use_async_yolo:
                     meta = packet.metadata
@@ -388,16 +401,22 @@ class AICameraWorker(QThread):
                                 submitted_at=now_mono,
                                 roi=packet.roi.copy(),
                                 reason=reason,
+                                full_frame=packet.frame.copy(),
                             )
                         )
                 elif packet.event is not None:
-                    event = packet.event
+                    event = dict(packet.event)
                     persons = event.get("persons", [])
                     object_detected = bool(event.get("detected", False))
                     class_id = event.get("class_id", -1)
                     person_detected = bool(
                         persons or (object_detected and class_id == 0)
                     )
+                    event["source_id"] = self.source_id
+                    if person_detected:
+                        ok, encoded = cv2.imencode(".jpg", packet.frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        if ok:
+                            event["alert_photo"] = encoded.tobytes()
                     self.observation_signal.emit(
                         person_detected,
                         event,
@@ -424,4 +443,3 @@ class AICameraWorker(QThread):
         if self.isRunning():
             return bool(self.wait(timeout_ms))
         return True
-
