@@ -716,38 +716,54 @@ class MainDashboard(QWidget):
     def _on_snmp_bandwidth_samples(self, samples):
         for sample in samples:
             try:
-                accepted = self.bandwidth_store.update(
-                    sample
-                )
+                self.bandwidth_store.update(sample)
             except Exception as error:
                 self.log_console(
                     f"[SNMP] Lỗi cập nhật mẫu: {error}", alert=True)
+
+    def _audit_snmp_snapshot(self, snapshot, now):
+        """Audit the same effective status used by the bandwidth graph/table."""
+        error_statuses = {
+            CollectorStatus.OFFLINE,
+            CollectorStatus.INTERFACE_DOWN,
+            CollectorStatus.COLLECTOR_ERROR,
+            CollectorStatus.STALE,
+        }
+        for source_id in config.SNMP_DEVICES:
+            info = snapshot.get(source_id)
+            if info is None:
                 continue
-            if not accepted:
-                continue
-            current_status = sample.status
-            previous_status = (
-                self._bandwidth_status_cache.get(
-                    sample.source_id
-                )
-            )
-            self._bandwidth_status_cache[sample.source_id] = current_status
+            current_status = info["status"]
+            sample = info.get("sample")
+            previous_status = self._bandwidth_status_cache.get(source_id)
             if current_status == previous_status:
                 continue
-            is_error = current_status in {
-                CollectorStatus.OFFLINE,
-                CollectorStatus.INTERFACE_DOWN,
-                CollectorStatus.COLLECTOR_ERROR,
-                CollectorStatus.STALE,
-            }
-            message = (
-                f"[SNMP BANDWIDTH] "
-                f"{sample.source_id}: "
-                f"{current_status.value}"
+            self._bandwidth_status_cache[source_id] = current_status
+            transition = (
+                f"{previous_status.value} -> {current_status.value}"
+                if previous_status is not None else current_status.value
             )
-            if sample.error:
-                message += f" lỗi: {sample.error}"
-            self.log_console(message, alert=is_error)
+            message = f"[SNMP BANDWIDTH] {source_id}: {transition}"
+            if current_status == CollectorStatus.STALE:
+                if sample is None:
+                    message += " | chưa có mẫu SNMP"
+                else:
+                    age = max(0.0, now - sample.sampled_at)
+                    message += (
+                        f" | mẫu cuối cách đây {age:.1f}s"
+                        f", trạng thái mẫu={sample.status.value}"
+                    )
+                    if sample.error:
+                        message += f", lỗi mẫu cuối: {sample.error}"
+            elif current_status == CollectorStatus.INTERFACE_DOWN:
+                details = sample.details if sample is not None else {}
+                message += (
+                    f" | admin={details.get('admin_status', '?')}"
+                    f", oper={details.get('oper_status', '?')}"
+                )
+            elif sample is not None and sample.error:
+                message += f" | lỗi: {sample.error}"
+            self.log_console(message, alert=current_status in error_statuses)
 
     def _on_snmp_bandwidth_error(self, message):
         self.log_console(
@@ -760,6 +776,8 @@ class MainDashboard(QWidget):
         """Vẽ lịch sử bandwidth thật từ BandwidthStore bằng kỹ thuật Blitting (<10ms trên Pi 4)."""
         now = time.time()
         snapshot = self.bandwidth_store.snapshot(now=now)
+        self._audit_snmp_snapshot(snapshot, now)
+        self._update_device_status_table(snapshot)
         status_signature = []
         maximum_value = 0.0
         valid_statuses = {CollectorStatus.ONLINE, CollectorStatus.STREAMING}
@@ -832,8 +850,6 @@ class MainDashboard(QWidget):
             self.canvas.blit(self.ax.bbox)
         except Exception:
             self.canvas.draw_idle()
-
-        self._update_device_status_table(snapshot)
 
     def _tick_ai(self):
         if self.simulate_ai:
@@ -1494,6 +1510,14 @@ class MainDashboard(QWidget):
             stopped = self.snmp_bandwidth_worker.wait(
                 5000
             )
+            if not stopped:
+                self.log_console(
+                    "[SNMP] Đang chờ truy vấn hiện tại kết thúc; "
+                    "hãy đóng lại sau vài giây.",
+                    alert=True,
+                )
+                event.ignore()
+                return
         if (
             self.pi_camera_bandwidth_worker
             is not None
