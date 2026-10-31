@@ -458,6 +458,7 @@ class Khung2DualCameraAITests(unittest.TestCase):
         d.canvas.height.return_value = 280
         d.canvas.copy_from_bbox.return_value = "cached_bg"
         d._update_device_status_table = Mock()
+        d._audit_snmp_snapshot = Mock()
 
         # Nhịp 1: khởi tạo cache nền tĩnh -> gọi canvas.draw() đúng 1 lần
         d._tick_bandwidth()

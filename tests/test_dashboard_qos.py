@@ -119,7 +119,9 @@ class DashboardQoSTests(unittest.TestCase):
             SimpleNamespace(source_id="R2_WAN", status=Status.ONLINE, error=None),
         ])
         d.qos_sync.reconcile.assert_not_called()
-        self.assertEqual(d._bandwidth_status_cache["R1_DSW1"], Status.INTERFACE_DOWN)
+        # Ingesting an observation must not assume it is still fresh at render time.
+        self.assertEqual(d._bandwidth_status_cache, {})
+        self.assertEqual(d.bandwidth_store.update.call_count, 2)
 
     def test_manual_qos_still_requests_policy(self):
         d = self.dashboard
