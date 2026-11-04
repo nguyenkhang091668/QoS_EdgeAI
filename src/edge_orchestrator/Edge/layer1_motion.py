@@ -24,11 +24,22 @@ class Camera:
         self.pi = source == 'picamera2'
         if self.pi:
             from picamera2 import Picamera2
+            from libcamera import Transform
+
             self.device = Picamera2(index)
             try:
-                # Picamera2 RGB888 produces BGR byte order for OpenCV.
-                self.device.configure(self.device.create_video_configuration(
-                    main={'size': (640, 480), 'format': 'RGB888'}))
+                self.device.configure(
+                    self.device.create_video_configuration(
+                        main={
+                            "size": (640, 480),
+                            "format": "RGB888",
+                        },
+                        transform=Transform(
+                            hflip=True,
+                            vflip=True,
+                        ),
+                    )
+                )
                 self.device.start()
             except Exception:
                 self.device.close()

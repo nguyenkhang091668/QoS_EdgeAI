@@ -347,5 +347,5 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 CAMERA_LOCATIONS = {
     "CAM03": "Kho tài liệu bảo mật tầng 8",
-    "CAM04": os.environ.get("CAM04_LOCATION", "Chưa cấu hình"),
+    "CAM04": os.environ.get("CAM04_LOCATION", "Kho tài liệu mật tầng 9"),
 }

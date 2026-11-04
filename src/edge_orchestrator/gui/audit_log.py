@@ -37,11 +37,12 @@ class AuditEntry:
 
 
 class AuditLogStore:
-    def __init__(self, limit=1000, coalesce_window_sec=45.0):
+    def __init__(self, limit=1000, coalesce_window_sec=65.0):
         if limit <= 0:
             raise ValueError("Giới hạn nhật ký phải lớn hơn 0")
 
         self._entries = deque(maxlen=limit)
+        self._active_by_key: dict[tuple[str, str], AuditEntry] = {}
         self.coalesce_window_sec = float(coalesce_window_sec)
 
     def append(self, message, category="Hệ thống", alert=False, severity=None, dedup_key=None, now_mono=None):
@@ -59,18 +60,18 @@ class AuditLogStore:
         now_mono = time.monotonic() if now_mono is None else float(now_mono)
         now_str = datetime.now().strftime("%H:%M:%S")
         key = str(dedup_key or text)
-        for existing in reversed(self._entries):
-            if now_mono - existing.last_seen_mono > self.coalesce_window_sec:
-                break
-            if existing.category == category and existing.dedup_key == key:
-                existing.count += 1
-                existing.timestamp = now_str
-                existing.last_seen_mono = now_mono
-                existing.message = text
-                existing.alert = bool(alert)
-                existing.severity = severity
-                existing.coalesced = True
-                return existing
+        lookup_key = (category, key)
+
+        existing = self._active_by_key.get(lookup_key)
+        if existing is not None and (now_mono - existing.last_seen_mono) <= self.coalesce_window_sec:
+            existing.count += 1
+            existing.timestamp = now_str
+            existing.last_seen_mono = now_mono
+            existing.message = text
+            existing.alert = bool(alert)
+            existing.severity = severity
+            existing.coalesced = True
+            return existing
 
         entry = AuditEntry(
             timestamp=now_str,
@@ -85,7 +86,14 @@ class AuditLogStore:
             coalesced=False,
         )
 
+        if len(self._entries) == self._entries.maxlen:
+            evicted = self._entries[0]
+            evicted_key = (evicted.category, evicted.dedup_key)
+            if self._active_by_key.get(evicted_key) is evicted:
+                self._active_by_key.pop(evicted_key, None)
+
         self._entries.append(entry)
+        self._active_by_key[lookup_key] = entry
         return entry
 
     def select(self, category="Tất cả"):
