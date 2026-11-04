@@ -755,45 +755,67 @@ class MainDashboard(QWidget):
         device_samples = {}
         for sample in samples:
             try:
-                accepted = self.bandwidth_store.update(sample)
+                self.bandwidth_store.update(sample)
             except Exception as error:
                 self.log_console(
                     f"[SNMP] Lỗi cập nhật mẫu: {error}", alert=True
                 )
-                continue
-            if not accepted:
-                continue
 
-            current_status = sample.status
-            self._bandwidth_status_cache[sample.source_id] = current_status
-            device_name = str(sample.source_id).split("_")[0]
-            device_samples.setdefault(device_name, []).append(sample)
+    def _audit_snmp_snapshot(self, snapshot, now):
+        """Ghi nhận trạng thái SNMP ở cấp thiết bị (R1, R2, DSW1, DSW2, ASW) cho Khung 3; từng cổng lẻ hiển thị ở Khung 4."""
+        device_state_map = getattr(self, "_device_snmp_online_state", None)
+        if device_state_map is None:
+            device_state_map = {}
+            self._device_snmp_online_state = device_state_map
 
-        # Chỉ ghi nhận lên Khung 3 khi cả thiết bị mất hoặc khôi phục kết nối SNMP
         offline_statuses = {
             CollectorStatus.OFFLINE,
             CollectorStatus.COLLECTOR_ERROR,
         }
-        for device_name, dev_list in device_samples.items():
-            all_offline = all(s.status in offline_statuses for s in dev_list)
-            any_reachable = any(s.status not in offline_statuses for s in dev_list)
+        device_infos = {}
+        for source_id in config.SNMP_DEVICES:
+            info = snapshot.get(source_id)
+            if info is None:
+                continue
+            current_status = info["status"]
+            self._bandwidth_status_cache[source_id] = current_status
+            device_name = str(source_id).split("_")[0]
+            device_infos.setdefault(device_name, []).append(info)
 
-            prev_dev_state = device_State_map.get(device_name)
+        for device_name, infos in device_infos.items():
+            if all(i["status"] == CollectorStatus.WARMING_UP for i in infos):
+                continue
+
+            all_offline = all(i["status"] in offline_statuses for i in infos)
+            any_reachable = any(
+                i["status"] not in offline_statuses
+                and i["status"] != CollectorStatus.WARMING_UP
+                for i in infos
+            )
+
+            prev_dev_state = device_state_map.get(device_name)
             if all_offline and prev_dev_state != "OFFLINE":
-                device_State_map[device_name] = "OFFLINE"
-                err_detail = next((s.error for s in dev_list if getattr(s, "error", None)), None)
+                device_state_map[device_name] = "OFFLINE"
+                err_detail = next(
+                    (
+                        i["sample"].error
+                        for i in infos
+                        if i.get("sample") is not None and getattr(i["sample"], "error", None)
+                    ),
+                    None,
+                )
                 msg = f"[SNMP] Thiết bị {device_name}: MẤT KẾT NỐI (OFFLINE)"
                 if err_detail:
                     msg += f" — {err_detail}"
                 self.log_console(msg, alert=True)
             elif any_reachable and prev_dev_state == "OFFLINE":
-                device_State_map[device_name] = "ONLINE"
+                device_state_map[device_name] = "ONLINE"
                 self.log_console(
                     f"[SNMP] Thiết bị {device_name}: ĐÃ KHÔI PHỤC KẾT NỐI (ONLINE)",
                     alert=False,
                 )
             elif any_reachable and prev_dev_state is None:
-                device_State_map[device_name] = "ONLINE"
+                device_state_map[device_name] = "ONLINE"
 
     def _on_snmp_bandwidth_error(self, message):
         self.log_console(
@@ -806,6 +828,8 @@ class MainDashboard(QWidget):
         """Vẽ lịch sử bandwidth thật từ BandwidthStore bằng kỹ thuật Blitting (<10ms trên Pi 4)."""
         now = time.time()
         snapshot = self.bandwidth_store.snapshot(now=now)
+        self._audit_snmp_snapshot(snapshot, now)
+        self._update_device_status_table(snapshot)
         status_signature = []
         maximum_value = 0.0
         valid_statuses = {CollectorStatus.ONLINE, CollectorStatus.STREAMING}
@@ -878,8 +902,6 @@ class MainDashboard(QWidget):
             self.canvas.blit(self.ax.bbox)
         except Exception:
             self.canvas.draw_idle()
-
-        self._update_device_status_table(snapshot)
 
     def _tick_ai(self):
         if self.simulate_ai:
@@ -1731,6 +1753,14 @@ class MainDashboard(QWidget):
             stopped = self.snmp_bandwidth_worker.wait(
                 5000
             )
+            if not stopped:
+                self.log_console(
+                    "[SNMP] Đang chờ truy vấn hiện tại kết thúc; "
+                    "hãy đóng lại sau vài giây.",
+                    alert=True,
+                )
+                event.ignore()
+                return
         if (
             self.pi_camera_bandwidth_worker
             is not None

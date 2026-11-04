@@ -1,7 +1,5 @@
 import unittest
 
-from concurrent.futures import ThreadPoolExecutor
-
 from edge_orchestrator.network.bandwidth_types import (
     BandwidthSample,
     CollectorStatus,
@@ -59,13 +57,8 @@ class CiscoBandwidthWorkerTests(unittest.TestCase):
             max_workers=5,
         )
 
-    def test_poll_cycle_preserves_source_order(self):
-        with ThreadPoolExecutor(
-            max_workers=5
-        ) as executor:
-            samples = self.worker._poll_cycle(
-                executor
-            )
+    def test_poll_host_preserves_interface_order(self):
+        samples = self.worker._poll_host(self.collector.source_ids)
 
         self.assertEqual(
             [sample.source_id for sample in samples],
@@ -82,12 +75,7 @@ class CiscoBandwidthWorkerTests(unittest.TestCase):
     def test_one_failure_does_not_drop_other_devices(self):
         self.collector.failures.add("R2")
 
-        with ThreadPoolExecutor(
-            max_workers=5
-        ) as executor:
-            samples = self.worker._poll_cycle(
-                executor
-            )
+        samples = self.worker._poll_host(self.collector.source_ids)
 
         self.assertEqual(len(samples), 5)
 
