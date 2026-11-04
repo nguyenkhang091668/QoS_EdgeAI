@@ -212,7 +212,13 @@ class MainDashboard(QWidget):
                 if not self.simulate_netmiko else None
             ),
         )
-        self.audit_log_store = AuditLogStore(1000)
+        self.audit_log_store = AuditLogStore(limit=1000, coalesce_window_sec=45.0)
+        self._active_log_category = "Tất cả"
+        self._filter_buttons = {}
+        self._acl_cooldown_sec = 60.0
+        self._acl_last_remediation_by_ip = {}
+        self._acl_last_global_ts = 0.0
+        self._device_snmp_online_state = {}
         self._init_ui()
         self._connect_signals()
         if not self.simulate_ai and not self.telegram_alerts.enabled:
@@ -318,6 +324,32 @@ class MainDashboard(QWidget):
                          "margin-top: 8px; padding: 4px; border-radius: 4px; }")
 
         lay3 = QVBoxLayout(g3)
+                # Thanh nút lọc Category ngay đầu Khung 3
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(4)
+        filter_categories = (
+            "Tất cả",
+            "Security/ACL",
+            "Dynamic QoS",
+            "Edge AI",
+            "Cisco",
+            "Collector",
+            "Hệ thống",
+            "Syslog thô",
+        )
+        for cat in filter_categories:
+            btn_cat = QPushButton(cat)
+            btn_cat.setCheckable(True)
+            btn_cat.setChecked(cat == "Tất cả")
+            btn_cat.setFont(QFont("Arial", 7, QFont.Bold))
+            btn_cat.clicked.connect(
+                lambda checked, c=cat: self._set_log_category_filter(c)
+            )
+            filter_row.addWidget(btn_cat)
+            self._filter_buttons[cat] = btn_cat
+        filter_row.addStretch()
+        self._update_filter_button_styles()
+        lay3.addLayout(filter_row)
         self.txt_console = QTextEdit()
         self.txt_console.setReadOnly(True)
         self.txt_console.document().setMaximumBlockCount(1000)
@@ -714,40 +746,54 @@ class MainDashboard(QWidget):
                 f"[SNMP] Lỗi khởi động collector: {error}", alert=True)
 
     def _on_snmp_bandwidth_samples(self, samples):
+        device_State_map = getattr(self, "_device_snmp_online_state", None)
+        if device_State_map is None:
+            device_State_map = {}
+            self._device_snmp_online_state = device_State_map
+
+        # Gom mẫu theo thiết bị (R1, R2, DSW1, DSW2, ASW)
+        device_samples = {}
         for sample in samples:
             try:
-                accepted = self.bandwidth_store.update(
-                    sample
-                )
+                accepted = self.bandwidth_store.update(sample)
             except Exception as error:
                 self.log_console(
-                    f"[SNMP] Lỗi cập nhật mẫu: {error}", alert=True)
+                    f"[SNMP] Lỗi cập nhật mẫu: {error}", alert=True
+                )
                 continue
             if not accepted:
                 continue
+
             current_status = sample.status
-            previous_status = (
-                self._bandwidth_status_cache.get(
-                    sample.source_id
-                )
-            )
             self._bandwidth_status_cache[sample.source_id] = current_status
-            if current_status == previous_status:
-                continue
-            is_error = current_status in {
-                CollectorStatus.OFFLINE,
-                CollectorStatus.INTERFACE_DOWN,
-                CollectorStatus.COLLECTOR_ERROR,
-                CollectorStatus.STALE,
-            }
-            message = (
-                f"[SNMP BANDWIDTH] "
-                f"{sample.source_id}: "
-                f"{current_status.value}"
-            )
-            if sample.error:
-                message += f" lỗi: {sample.error}"
-            self.log_console(message, alert=is_error)
+            device_name = str(sample.source_id).split("_")[0]
+            device_samples.setdefault(device_name, []).append(sample)
+
+        # Chỉ ghi nhận lên Khung 3 khi cả thiết bị mất hoặc khôi phục kết nối SNMP
+        offline_statuses = {
+            CollectorStatus.OFFLINE,
+            CollectorStatus.COLLECTOR_ERROR,
+        }
+        for device_name, dev_list in device_samples.items():
+            all_offline = all(s.status in offline_statuses for s in dev_list)
+            any_reachable = any(s.status not in offline_statuses for s in dev_list)
+
+            prev_dev_state = device_State_map.get(device_name)
+            if all_offline and prev_dev_state != "OFFLINE":
+                device_State_map[device_name] = "OFFLINE"
+                err_detail = next((s.error for s in dev_list if getattr(s, "error", None)), None)
+                msg = f"[SNMP] Thiết bị {device_name}: MẤT KẾT NỐI (OFFLINE)"
+                if err_detail:
+                    msg += f" — {err_detail}"
+                self.log_console(msg, alert=True)
+            elif any_reachable and prev_dev_state == "OFFLINE":
+                device_State_map[device_name] = "ONLINE"
+                self.log_console(
+                    f"[SNMP] Thiết bị {device_name}: ĐÃ KHÔI PHỤC KẾT NỐI (ONLINE)",
+                    alert=False,
+                )
+            elif any_reachable and prev_dev_state is None:
+                device_State_map[device_name] = "ONLINE"
 
     def _on_snmp_bandwidth_error(self, message):
         self.log_console(
@@ -941,52 +987,98 @@ class MainDashboard(QWidget):
             while True:
                 event = syslog_event_queue.get_nowait()
 
-                event_type = event.get(
-                    "type",
-                    EventType.UNKNOWN_SYS_LOG,)
-                data = event.get("data", {})
-                timestamp = event.get(
-                    "timestamp",
-                    "??:??:??",
-                )
-                device = event.get("device_name") or event.get(
-                    "source_ip", "UNKOWN")
+                event_type = event.get("type", EventType.UNKNOWN_SYS_LOG)
+                data = event.get("data", {}) or {}
+                device = event.get("device_name") or event.get("source_ip", "UNKNOWN")
+                raw = event.get("raw", "")
+                details = event.get("details", raw)
                 self._device_last_syslog[device] = f"{event_type}"
+
+                # 1. Nhóm Security / ACL
                 if event_type == EventType.PORT_SECURITY_VIOLATION:
-                    mac = data.get("mac")
+                    mac = data.get("mac") or "?"
                     interface = data.get("interface", "?")
                     self.log_console(
-                        f"[{timestamp}] [{device}] PORT SECURITY VIOLATION | MAC: {mac or '?'} | Port: {interface}", alert=True)
+                        f"[{device}] Vi phạm Port-Security tại {interface} (MAC: {mac})",
+                        alert=True,
+                        category="Security/ACL",
+                        severity="CRITICAL",
+                        dedup_key=f"PSEC:{device}:{interface}:{mac}",
+                    )
+
                 elif event_type == EventType.DAI_ARP_SPOOFING_DENY:
                     attacker_ip = data.get("src_ip")
-                    attacker_mac = data.get("src_mac")
+                    attacker_mac = data.get("src_mac") or "?"
                     interface = data.get("interface", "?")
-
+                    vlan = data.get("vlan", "?")
                     self.log_console(
-                        f"[{timestamp}] [{device}] DAI ARP SPOOFING | IP: {attacker_ip or '?'} | MAC: {attacker_mac or '?'} | Port: {interface}", alert=True)
-
+                        f"[{device}] Chặn ARP Spoofing (DAI) tại {interface} (VLAN {vlan}) | IP: {attacker_ip or '?'} | MAC: {attacker_mac}",
+                        alert=True,
+                        category="Security/ACL",
+                        severity="CRITICAL",
+                        dedup_key=f"DAI:{device}:{interface}:{attacker_ip}:{attacker_mac}",
+                    )
                     if attacker_ip:
-                        self._run_acl_remediation(
-                            attacker_ip,
-                            attacker_mac,
-                        )
+                        self._run_acl_remediation(attacker_ip, attacker_mac)
                     else:
                         self.log_console(
-                            "[ACL] Không remediation vì event "
-                            "không có src_ip.",
+                            "Không thể cô lập ACL vì sự kiện DAI thiếu src_ip.",
                             alert=True,
+                            category="Security/ACL",
+                            severity="WARNING",
+                            dedup_key=f"DAI_NO_IP:{device}:{interface}",
                         )
 
+                # 2. Nhóm Syslog thô (%SYS-5-CONFIG_I hoặc không khớp regex)
+                elif event_type == EventType.UNKNOWN_SYS_LOG or "%SYS-5-CONFIG_I" in raw:
+                    clean_raw = raw[:160] if raw else details[:160]
+                    self.log_console(
+                        f"[{device}] {clean_raw}",
+                        alert=False,
+                        category="Syslog thô",
+                        severity="INFO",
+                        dedup_key=f"RAW:{device}:{clean_raw[:60]}",
+                    )
+
+                # 3. Nhóm Cisco (L2/L3 chuẩn hóa, không còn chuỗi EventType.xxx)
                 elif event_type == EventType.INTERFACE_LINK_CHANGE:
                     state = data.get("state", "unknown").upper()
                     interface = data.get("interface", "?")
+                    is_down = state == "DOWN"
                     self.log_console(
-                        f"[{timestamp}] [{device}] Interface {interface}: {state}", alert=(state == "DOWN"))
+                        f"[{device}] Cổng {interface} chuyển trạng thái: {state}",
+                        alert=is_down,
+                        category="Cisco",
+                        severity="WARNING" if is_down else "INFO",
+                        dedup_key=f"LINK:{device}:{interface}:{state}",
+                    )
+
                 else:
-                    raw = event.get("raw", "")
-                    details = event.get("details", raw)
+                    # Phân cấp màu cho các sự kiện Cisco còn lại (OSPF, HSRP, CDP, LACP, Err-Disable...)
+                    sev_raw = str(event.get("severity", "INFO")).upper()
+                    if event_type in (EventType.ERR_DISABLE_FLAP, EventType.SSH_KEX_NO_MATCH) or sev_raw in ("CRITICAL", "EMERGENCY", "ALERT", "ERROR"):
+                        ui_sev = "CRITICAL"
+                        is_alert = True
+                    elif event_type in (EventType.NATIVE_VLAN_MISMATCH, EventType.LACP_PORT_SUSPENDED, EventType.HSRP_STATE_CHANGE) or sev_raw == "WARNING":
+                        ui_sev = "WARNING"
+                        is_alert = True
+                    else:
+                        ui_sev = "INFO"
+                        is_alert = False
+
+                    key_suffix = (
+                        data.get("interface")
+                        or data.get("local_int")
+                        or data.get("neighbor_ip")
+                        or details[:40]
+                    )
                     self.log_console(
-                        f"[{timestamp}] [{device}] {event_type}: {details[:120]}")
+                        f"[{device}] {details[:140]}",
+                        alert=is_alert,
+                        category="Cisco",
+                        severity=ui_sev,
+                        dedup_key=f"CISCO:{device}:{event_type}:{key_suffix}",
+                    )
 
         except queue.Empty:
             pass
@@ -1056,29 +1148,18 @@ class MainDashboard(QWidget):
             self._telemetry_state_cache[camera_id] = telemetry_state
 
             # Chỉ ghi log khi trạng thái thay đổi.
+            # Chỉ ghi log khi mất luồng hoàn toàn (NO_STREAM) hoặc khôi phục từ NO_STREAM.
+            # Suy thoái (DEGRADED) đã có QoSDecisionEngine debounce xử lý.
             if telemetry_state != previous_state:
                 if telemetry_state == "NO_STREAM":
                     self.log_console(
-                        f"[TELEMETRY] {camera_id} "
-                        f"(UDP/{port}): NO_STREAM",
+                        f"[TELEMETRY] {camera_id} (UDP/{port}): Mất luồng RTP (NO_STREAM)",
                         alert=True,
                     )
-
-                elif telemetry_state == "DEGRADED":
+                elif previous_state == "NO_STREAM":
                     self.log_console(
-                        f"[TELEMETRY] {camera_id} "
-                        f"(UDP/{port}): DEGRADED | "
-                        f"Bitrate={bitrate:.3f} Mbps | "
-                        f"Loss={loss:.2f}% | "
-                        f"Jitter={jitter:.2f} ms",
-                        alert=True,
-                    )
-
-                else:
-                    self.log_console(
-                        f"[TELEMETRY] {camera_id} "
-                        f"(UDP/{port}): STREAMING | "
-                        f"Bitrate={bitrate:.3f} Mbps"
+                        f"[TELEMETRY] {camera_id} (UDP/{port}): Đã có luồng RTP trở lại ({bitrate:.2f} Mbps)",
+                        alert=False,
                     )
 
             # NO_STREAM là trạng thái nguồn không có luồng,
@@ -1138,16 +1219,6 @@ class MainDashboard(QWidget):
 
     def _on_network_state_change(self, state: str):
         self._network_state = state
-        if state == "QOS_DEGRADED":
-            self.log_console(
-                "[NETWORK]  Mạng suy thoái — cảnh báo giám sát.",
-                alert=True,
-            )
-        elif state == "NORMAL":
-            self.log_console(
-                "[NETWORK]  Chất lượng mạng đã phục hồi.",
-                alert=False,
-            )
 
     def _apply_network_policy(self, policy: str):
         policy = policy.upper()
@@ -1197,7 +1268,24 @@ class MainDashboard(QWidget):
         attacker_ip: str,
         attacker_mac: str | None = None,
     ):
+        now = time.monotonic()
+        cooldown_sec = getattr(self, "_acl_cooldown_sec", 60.0)
+        cooldown_map = getattr(self, "_acl_last_remediation_by_ip", None)
+        if cooldown_map is None:
+            cooldown_map = {}
+            self._acl_last_remediation_by_ip = cooldown_map
+
+        last_ts = cooldown_map.get(attacker_ip)
+        if last_ts is not None and (now - last_ts) < cooldown_sec:
+            remaining = int(cooldown_sec - (now - last_ts))
+            self.log_console(
+                f"[ACL] Bỏ qua SSH R1 cho IP {attacker_ip} (đang trong cooldown, còn {remaining}s).",
+                alert=False,
+            )
+            return
+
         if self.simulate_netmiko:
+            cooldown_map[attacker_ip] = now
             self.log_console(
                 f"[ACL SIMULATION] Cô lập {attacker_ip}",
                 alert=True,
@@ -1212,6 +1300,11 @@ class MainDashboard(QWidget):
             )
             return
 
+        cooldown_map[attacker_ip] = now
+        self.log_console(
+            f"[ACL] Đang đẩy lệnh cô lập IP {attacker_ip} (MAC: {attacker_mac or '?'}) lên R1...",
+            alert=True,
+        )
         controller.isolate_attacker(
             attacker_ip,
             attacker_mac,
@@ -1266,30 +1359,174 @@ class MainDashboard(QWidget):
             self.lbl_camera.setTextFormat(Qt.RichText)
 
     # ── LOG CONSOLE ───────────────────────────────────────────────────────────
+    # ── LOG CONSOLE & BỘ LỌC KHUNG 3 ──────────────────────────────────────────
+    SEVERITY_COLORS = {
+        "CRITICAL": "#ff5252",  # Đỏ: Tấn công / Mất kết nối nghiêm trọng
+        "WARNING": "#ffca28",   # Vàng: Cảnh báo suy thoái / Bất thường L2
+        "ACTION": "#4fc3f7",    # Xanh Cyan: Hành động điều phối QoS & AI
+        "INFO": "#8b949e",      # Xám nhạt: Thông tin hệ thống thường
+    }
+
+    PREFIX_CATEGORY_MAP = (
+        ("[DYNAMIC QOS]", "Dynamic QoS"),
+        ("[QOS ENGINE]", "Dynamic QoS"),
+        ("[NETMIKO SIMULATION]", "Dynamic QoS"),
+        ("[NETMIKO]", "Dynamic QoS"),
+        ("[MANUAL]", "Dynamic QoS"),
+        ("[AI ENGINE]", "Edge AI"),
+        ("[EDGE AI ERROR]", "Edge AI"),
+        ("[EDGE AI]", "Edge AI"),
+        ("[TELEGRAM]", "Edge AI"),
+        ("[ACL SIMULATION]", "Security/ACL"),
+        ("[MANUAL ACL]", "Security/ACL"),
+        ("[ACL]", "Security/ACL"),
+        ("[SNMP BANDWIDTH]", "Collector"),
+        ("[SNMP WORKER ERROR]", "Collector"),
+        ("[SNMP]", "Collector"),
+        ("[RTP COLLECTOR ERROR]", "Collector"),
+        ("[RTP BANDWIDTH]", "Collector"),
+        ("[TELEMETRY]", "Collector"),
+        ("[LOCAL BANDWIDTH]", "Collector"),
+        ("[LOCAL CAMERA ERROR]", "Collector"),
+        ("[CAM03]", "Collector"),
+        ("[CAM04]", "Collector"),
+        ("[SYSTEM]", "Hệ thống"),
+        ("[TAILSCALE]", "Hệ thống"),
+    )
+
+    def _normalize_log_input(
+        self,
+        text: str,
+        alert: bool,
+        category: str,
+        severity: str | None,
+    ) -> tuple[str, str, str]:
+        clean = " ".join(str(text).split())
+
+        # 1. Tự động suy diễn Category và gọt bỏ tiền tố thừa ở đầu chuỗi
+        for prefix, mapped_cat in self.PREFIX_CATEGORY_MAP:
+            if clean.upper().startswith(prefix):
+                if category == "Hệ thống":
+                    category = mapped_cat
+                clean = clean[len(prefix):].strip()
+                break
+
+        if clean.startswith("SIMULATE MODE:"):
+            category = "Hệ thống"
+
+        # 2. Tự động phân cấp 4 mức màu nếu caller không truyền severity tường minh
+        if severity is None:
+            upper_msg = clean.upper()
+            if category == "Security/ACL":
+                severity = "CRITICAL" if alert else "INFO"
+            elif category == "Dynamic QoS":
+                if "SUY THOÁI" in upper_msg or "DEGRADED" in upper_msg:
+                    severity = "WARNING"
+                elif alert and ("LỖI" in upper_msg or "TIMEOUT" in upper_msg or "KHÔNG HỢP LỆ" in upper_msg or "THẤT BẠI" in upper_msg):
+                    severity = "CRITICAL"
+                else:
+                    severity = "ACTION"
+            elif category == "Edge AI":
+                if alert and ("ERROR" in upper_msg or "LỖI" in upper_msg or "NO FRESH" in upper_msg):
+                    severity = "WARNING"
+                elif "KÍCH HOẠT CẢNH BÁO" in upper_msg or "HỦY CẢNH BÁO" in upper_msg:
+                    severity = "ACTION"
+                else:
+                    severity = "INFO"
+            elif category == "Collector":
+                severity = "CRITICAL" if alert else "INFO"
+            else:
+                severity = "CRITICAL" if alert else "INFO"
+
+        return clean, category, severity
+
     def log_console(
         self,
         text: str,
         alert: bool = False,
         category: str = "Hệ thống",
+        severity: str | None = None,
+        dedup_key: str | None = None,
     ):
-        if category == "Hệ thống" and text.startswith("[DYNAMIC QOS]"):
-            category = "Dynamic QoS"
+        clean_text, resolved_cat, resolved_sev = self._normalize_log_input(
+            text, alert, category, severity
+        )
         entry = self.audit_log_store.append(
-            message=text, category=category, alert=alert)
-        self._append_log_entry(entry)
+            message=clean_text,
+            category=resolved_cat,
+            alert=alert,
+            severity=resolved_sev,
+            dedup_key=dedup_key or clean_text,
+        )
+        self._render_or_update_log_entry(entry)
 
-    def _append_log_entry(self, entry):
-        color = "#ff5252" if entry.alert else "#00e676"
+    def _format_entry_html(self, entry) -> str:
+        color = self.SEVERITY_COLORS.get(
+            getattr(entry, "severity", "INFO"),
+            "#ff5252" if entry.alert else "#8b949e",
+        )
         timestamp = escape(entry.timestamp)
         category = escape(entry.category)
-        message = escape(entry.message)
-        self.txt_console.append(
-            f"<font color='{color}'>"
-            f"[{timestamp}] [{category}] {message}"
-            f"</font>"
-        )
+        message = escape(getattr(entry, "display_message", entry.message))
+        return f"<font color='{color}'>[{timestamp}] [{category}] {message}</font>"
+
+    def _entry_visible_in_current_filter(self, entry) -> bool:
+        active_cat = getattr(self, "_active_log_category", "Tất cả")
+        if active_cat == "Tất cả":
+            return entry.category != "Syslog thô"
+        return entry.category == active_cat
+
+    def _render_or_update_log_entry(self, entry):
+        if not self._entry_visible_in_current_filter(entry):
+            return
+
         scrollbar = self.txt_console.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        was_near_bottom = (scrollbar.maximum() - scrollbar.value()) <= 24
+        saved_scroll_pos = scrollbar.value()
+
+        if getattr(entry, "coalesced", False):
+            # Nếu sự kiện trùng được gộp, cập nhật lại khung hiển thị để hiện (lặp lại ×N) ngay trên dòng đó
+            self._rebuild_console_view(preserve_scroll=not was_near_bottom, saved_pos=saved_scroll_pos)
+            return
+
+        self.txt_console.append(self._format_entry_html(entry))
+        if was_near_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(saved_scroll_pos)
+
+    def _rebuild_console_view(self, preserve_scroll=False, saved_pos=0):
+        scrollbar = self.txt_console.verticalScrollBar()
+        active_cat = getattr(self, "_active_log_category", "Tất cả")
+        entries = self.audit_log_store.select(active_cat)
+        html_lines = [self._format_entry_html(e) for e in entries]
+        self.txt_console.setHtml("<br>".join(html_lines))
+        if preserve_scroll:
+            scrollbar.setValue(saved_pos)
+        else:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _set_log_category_filter(self, category: str):
+        self._active_log_category = category
+        self._update_filter_button_styles()
+        self._rebuild_console_view(preserve_scroll=False)
+
+    def _update_filter_button_styles(self):
+        active_cat = getattr(self, "_active_log_category", "Tất cả")
+        for cat, btn in getattr(self, "_filter_buttons", {}).items():
+            is_active = (cat == active_cat)
+            btn.setChecked(is_active)
+            if is_active:
+                btn.setStyleSheet(
+                    "QPushButton { background: #1f6feb; color: #ffffff; "
+                    "border: 1px solid #58a6ff; border-radius: 3px; padding: 2px 6px; }"
+                )
+            else:
+                btn.setStyleSheet(
+                    "QPushButton { background: #161b22; color: #8b949e; "
+                    "border: 1px solid #30363d; border-radius: 3px; padding: 2px 6px; } "
+                    "QPushButton:hover { background: #21262d; color: #e6edf3; }"
+                )
 
     def _on_real_camera_frame(self, frame, source_id="CAM03"):
         if frame is None:
