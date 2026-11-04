@@ -38,25 +38,32 @@ class NetworkController:
 
     def __init__(self, target_device="R1", username=None, password=None, secret=None):
         if not isinstance(target_device, str) or target_device not in DEVICE_ACCESS_MAP:
-            raise ValueError(f"Không tìm thấy thiết bị {target_device} trong DEVICE_ACCESS_MAP!")
+            raise ValueError(
+                f"Không tìm thấy thiết bị {target_device} trong DEVICE_ACCESS_MAP!")
         if ConnectHandler is None:
-            raise RuntimeError(f"Không import được Netmiko: {NETMIKO_IMPORT_ERROR}")
+            raise RuntimeError(
+                f"Không import được Netmiko: {NETMIKO_IMPORT_ERROR}")
         if paramiko is None:
-            raise RuntimeError(f"Không import được Paramiko: {PARAMIKO_IMPORT_ERROR}")
+            raise RuntimeError(
+                f"Không import được Paramiko: {PARAMIKO_IMPORT_ERROR}")
         device_info = DEVICE_ACCESS_MAP[target_device]
         self.target_name = target_device
         self.target_ip = device_info["ip"]
         self.target_port = device_info["port"]
-        self.username = os.environ.get("SSH_USERNAME", "") if username is None else username
-        self.password = os.environ.get("SSH_PASSWORD", "") if password is None else password
-        self.secret = os.environ.get("SSH_ENABLE_PASSWORD", "") if secret is None else secret
+        self.username = os.environ.get(
+            "SSH_USERNAME", "") if username is None else username
+        self.password = os.environ.get(
+            "SSH_PASSWORD", "") if password is None else password
+        self.secret = os.environ.get(
+            "SSH_ENABLE_PASSWORD", "") if secret is None else secret
         # Serialize this device's ACL/legacy operations with its QoS worker only.
         self._io_lock = threading.Lock()
 
     def _create_jump_socket(self):
         jump_ip = os.environ.get("JUMP_IP", "").strip()
         if not jump_ip:
-            raise ValueError("JUMP_IP đang rỗng; cần nạp ssh.env trước khi chạy")
+            raise ValueError(
+                "JUMP_IP đang rỗng; cần nạp ssh.env trước khi chạy")
         jump_client = paramiko.SSHClient()
         jump_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
@@ -68,7 +75,8 @@ class NetworkController:
             )
             transport = jump_client.get_transport()
             if transport is None or not transport.is_active():
-                raise ConnectionError("SSH transport tới Jump Host không hoạt động")
+                raise ConnectionError(
+                    "SSH transport tới Jump Host không hoạt động")
             channel = transport.open_channel(
                 "direct-tcpip", (self.target_ip, self.target_port),
                 ("127.0.0.1", 0), timeout=10,
@@ -118,7 +126,8 @@ class NetworkController:
         )
         # Also check explicitly for adapters that return CLI errors as output.
         if re.search(CONFIG_ERROR_PATTERN, output):
-            raise RuntimeError("Cisco từ chối lệnh cấu hình: " + output.strip()[:300])
+            raise RuntimeError(
+                "Cisco từ chối lệnh cấu hình: " + output.strip()[:300])
         return output
 
     def _push_config(self, commands):
@@ -129,20 +138,23 @@ class NetworkController:
             print(f"[NETMIKO] {self.target_name}: gửi cấu hình thành công.")
             return True
         except Exception as error:
-            print(f"[NETMIKO] {self.target_name}: gửi cấu hình thất bại: {error}")
+            print(
+                f"[NETMIKO] {self.target_name}: gửi cấu hình thất bại: {error}")
             return False
 
     def read_vrrp_roles(self):
         """Read-only query; the notifier calls this outside the GUI thread."""
         with self._session() as connection:
-            output = connection.send_command("show vrrp brief", read_timeout=10)
+            output = connection.send_command(
+                "show vrrp brief", read_timeout=10)
         return parse_vrrp_brief(output)
 
     def test_ssh_connection(self):
         try:
             with self._session() as connection:
                 prompt = connection.find_prompt()
-            print(f"[CI/CD] ĐÃ KẾT NỐI THÀNH CÔNG VÀO {self.target_name} ({prompt})")
+            print(
+                f"[CI/CD] ĐÃ KẾT NỐI THÀNH CÔNG VÀO {self.target_name} ({prompt})")
             return True
         except Exception as error:
             print(f"[CI/CD] KẾT NỐI {self.target_name} THẤT BẠI: {error}")
@@ -167,7 +179,8 @@ class NetworkController:
                 continue
             if in_camera:
                 bandwidth_ok |= line == f"bandwidth {bandwidth_kbps}"
-                dscp_ok |= bool(re.fullmatch(r"set (?:ip )?dscp (?:af41|34)", line))
+                dscp_ok |= bool(re.fullmatch(
+                    r"set (?:ip )?dscp (?:af41|34)", line))
         return bandwidth_ok and dscp_ok
 
     def ensure_qos_policy(self, policy):
@@ -181,7 +194,8 @@ class NetworkController:
             raise ValueError(f"Policy không hợp lệ: {policy}")
         bandwidth = 8000 if policy == "ALERT" else 1000
         with self._session() as connection:
-            current = connection.send_command(QOS_SHOW_COMMAND, read_timeout=15)
+            current = connection.send_command(
+                QOS_SHOW_COMMAND, read_timeout=15)
             if self._camera_policy_matches(current, bandwidth):
                 return PolicySyncResult(policy, changed=False)
             commands = [
@@ -193,7 +207,8 @@ class NetworkController:
                 "  fair-queue",
             ]
             self._send_config(connection, commands)
-            verified = connection.send_command(QOS_SHOW_COMMAND, read_timeout=15)
+            verified = connection.send_command(
+                QOS_SHOW_COMMAND, read_timeout=15)
             if not self._camera_policy_matches(verified, bandwidth):
                 raise RuntimeError(
                     f"{self.target_name}: cấu hình đọc lại không khớp {policy} "
@@ -211,12 +226,14 @@ class NetworkController:
             return False
 
     def apply_qos_remediation(self):
-        worker = threading.Thread(target=self.set_qos_policy, args=("ALERT",), daemon=True)
+        worker = threading.Thread(
+            target=self.set_qos_policy, args=("ALERT",), daemon=True)
         worker.start()
         return worker
 
     def revert_qos_remediation(self):
-        worker = threading.Thread(target=self.set_qos_policy, args=("NORMAL",), daemon=True)
+        worker = threading.Thread(
+            target=self.set_qos_policy, args=("NORMAL",), daemon=True)
         worker.start()
         return worker
 
@@ -224,6 +241,7 @@ class NetworkController:
         commands = [
             f"!--- AUTO-REMEDIATION: Isolate attacker {attacker_ip} ---",
             "ip access-list extended ACL_ISOLATE_ATTACKER",
+            " no permit ip any any",
             f" deny ip host {attacker_ip} any log",
             f" deny ip any host {attacker_ip} log",
             " permit ip any any",
@@ -231,7 +249,8 @@ class NetworkController:
             "interface GigabitEthernet0/0",
             " ip access-group ACL_ISOLATE_ATTACKER in",
         ]
-        worker = threading.Thread(target=self._push_config, args=(commands,), daemon=True)
+        worker = threading.Thread(
+            target=self._push_config, args=(commands,), daemon=True)
         worker.start()
         return worker
 
