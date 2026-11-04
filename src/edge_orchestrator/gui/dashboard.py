@@ -19,12 +19,14 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
 )
+from collections import deque
 from PyQt5.QtGui import (
     QFont,
     QImage,
     QPixmap,
     QColor,
     QPalette,
+    QTextCursor,
 )
 from edge_orchestrator.gui.audit_log import AuditLogStore
 from edge_orchestrator.core import config
@@ -212,9 +214,12 @@ class MainDashboard(QWidget):
                 if not self.simulate_netmiko else None
             ),
         )
-        self.audit_log_store = AuditLogStore(limit=1000, coalesce_window_sec=45.0)
+        self.audit_log_store = AuditLogStore(limit=1000, coalesce_window_sec=65.0)
         self._active_log_category = "Tất cả"
         self._filter_buttons = {}
+        self._rendered_entries = deque(maxlen=1000)
+        self._defer_coalesce_repaint = False
+        self._dirty_coalesced_entries = []
         self._acl_cooldown_sec = 60.0
         self._acl_last_remediation_by_ip = {}
         self._acl_last_global_ts = 0.0
@@ -1005,6 +1010,7 @@ class MainDashboard(QWidget):
         ))
 
     def _tick_syslog(self):
+        self._defer_coalesce_repaint = True
         try:
             while True:
                 event = syslog_event_queue.get_nowait()
@@ -1104,6 +1110,9 @@ class MainDashboard(QWidget):
 
         except queue.Empty:
             pass
+        finally:
+            self._defer_coalesce_repaint = False
+            self._flush_deferred_coalesced_entries()
 
     def _manual_acl(self):
         test_ip = "192.168.10.99"
@@ -1299,10 +1308,13 @@ class MainDashboard(QWidget):
 
         last_ts = cooldown_map.get(attacker_ip)
         if last_ts is not None and (now - last_ts) < cooldown_sec:
-            remaining = int(cooldown_sec - (now - last_ts))
+            remaining = max(1, int(cooldown_sec - (now - last_ts)))
             self.log_console(
                 f"[ACL] Bỏ qua SSH R1 cho IP {attacker_ip} (đang trong cooldown, còn {remaining}s).",
                 alert=False,
+                category="Security/ACL",
+                severity="INFO",
+                dedup_key=f"ACL_COOLDOWN:{attacker_ip}",
             )
             return
 
@@ -1327,10 +1339,20 @@ class MainDashboard(QWidget):
             f"[ACL] Đang đẩy lệnh cô lập IP {attacker_ip} (MAC: {attacker_mac or '?'}) lên R1...",
             alert=True,
         )
-        controller.isolate_attacker(
-            attacker_ip,
-            attacker_mac,
-        )
+        try:
+            controller.isolate_attacker(
+                attacker_ip,
+                attacker_mac,
+            )
+        except ValueError as error:
+            cooldown_map.pop(attacker_ip, None)
+            self.log_console(
+                f"[ACL] Từ chối cô lập IP không hợp lệ ({attacker_ip}): {error}",
+                alert=True,
+                category="Security/ACL",
+                severity="WARNING",
+                dedup_key=f"ACL_INVALID_IP:{attacker_ip}",
+            )
     # ── CAMERA FRAME RENDERER ─────────────────────────────────────────────────
 
     def _update_cam_frame(self, is_alert: bool):
@@ -1498,18 +1520,87 @@ class MainDashboard(QWidget):
             return entry.category != "Syslog thô"
         return entry.category == active_cat
 
+    def _update_single_log_block(self, entry) -> bool:
+        rendered = getattr(self, "_rendered_entries", None)
+        if rendered is None:
+            return False
+        target_idx = -1
+        for idx in range(len(rendered) - 1, -1, -1):
+            if rendered[idx] is entry:
+                target_idx = idx
+                break
+        if target_idx < 0:
+            return False
+
+        doc = self.txt_console.document()
+        block = doc.findBlockByNumber(target_idx)
+        if not block.isValid():
+            return False
+
+        scrollbar = self.txt_console.verticalScrollBar()
+        was_near_bottom = (scrollbar.maximum() - scrollbar.value()) <= 24
+        saved_scroll_pos = scrollbar.value()
+
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.StartOfBlock)
+        cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+        cursor.insertHtml(self._format_entry_html(entry))
+
+        if was_near_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(saved_scroll_pos)
+        return True
+
+    def _flush_deferred_coalesced_entries(self):
+        dirty_list = getattr(self, "_dirty_coalesced_entries", None)
+        if not dirty_list:
+            return
+        pending = list(dirty_list)
+        dirty_list.clear()
+        for entry in pending:
+            if not self._entry_visible_in_current_filter(entry):
+                continue
+            if not self._update_single_log_block(entry):
+                scrollbar = self.txt_console.verticalScrollBar()
+                was_near_bottom = (scrollbar.maximum() - scrollbar.value()) <= 24
+                self._rebuild_console_view(
+                    preserve_scroll=not was_near_bottom,
+                    saved_pos=scrollbar.value(),
+                )
+                break
+
     def _render_or_update_log_entry(self, entry):
         if not self._entry_visible_in_current_filter(entry):
+            return
+
+        if getattr(entry, "coalesced", False):
+            if getattr(self, "_defer_coalesce_repaint", False):
+                dirty_list = getattr(self, "_dirty_coalesced_entries", None)
+                if dirty_list is None:
+                    dirty_list = []
+                    self._dirty_coalesced_entries = dirty_list
+                if all(existing is not entry for existing in dirty_list):
+                    dirty_list.append(entry)
+                return
+            if not self._update_single_log_block(entry):
+                scrollbar = self.txt_console.verticalScrollBar()
+                was_near_bottom = (scrollbar.maximum() - scrollbar.value()) <= 24
+                self._rebuild_console_view(
+                    preserve_scroll=not was_near_bottom,
+                    saved_pos=scrollbar.value(),
+                )
             return
 
         scrollbar = self.txt_console.verticalScrollBar()
         was_near_bottom = (scrollbar.maximum() - scrollbar.value()) <= 24
         saved_scroll_pos = scrollbar.value()
 
-        if getattr(entry, "coalesced", False):
-            # Nếu sự kiện trùng được gộp, cập nhật lại khung hiển thị để hiện (lặp lại ×N) ngay trên dòng đó
-            self._rebuild_console_view(preserve_scroll=not was_near_bottom, saved_pos=saved_scroll_pos)
-            return
+        rendered = getattr(self, "_rendered_entries", None)
+        if rendered is None:
+            rendered = deque(maxlen=1000)
+            self._rendered_entries = rendered
+        rendered.append(entry)
 
         self.txt_console.append(self._format_entry_html(entry))
         if was_near_bottom:
@@ -1520,9 +1611,23 @@ class MainDashboard(QWidget):
     def _rebuild_console_view(self, preserve_scroll=False, saved_pos=0):
         scrollbar = self.txt_console.verticalScrollBar()
         active_cat = getattr(self, "_active_log_category", "Tất cả")
-        entries = self.audit_log_store.select(active_cat)
-        html_lines = [self._format_entry_html(e) for e in entries]
-        self.txt_console.setHtml("<br>".join(html_lines))
+        entries = self.audit_log_store.select(active_cat)[-1000:]
+        self._rendered_entries = deque(entries, maxlen=1000)
+        dirty_list = getattr(self, "_dirty_coalesced_entries", None)
+        if dirty_list is not None:
+            dirty_list.clear()
+
+        if not entries:
+            self.txt_console.clear()
+            self.txt_console.document().setMaximumBlockCount(1000)
+            return
+
+        html_blocks = "".join(
+            f"<p style='margin:0'>{self._format_entry_html(e)}</p>"
+            for e in entries
+        )
+        self.txt_console.setHtml(html_blocks)
+        self.txt_console.document().setMaximumBlockCount(1000)
         if preserve_scroll:
             scrollbar.setValue(saved_pos)
         else:

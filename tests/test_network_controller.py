@@ -129,12 +129,76 @@ class NetworkControllerTests(unittest.TestCase):
                 worker.join(1)
                 setter.assert_called_with(policy)
 
-    def test_acl_uses_single_device_push_signature(self):
-        with patch.object(self.controller, "_push_config", return_value=True) as push:
-            worker = self.controller.isolate_attacker("192.168.10.99")
-            worker.join(1)
-            commands, = push.call_args.args
-            self.assertIn(" deny ip host 192.168.10.99 any log", commands)
+    def test_acl_fresh_router_creates_anchor_before_binding_without_no_permit(self):
+        connection = self.connection([""])
+        worker = self.controller.isolate_attacker("192.168.10.99")
+        worker.join(1)
+        commands, = connection.send_config_set.call_args.args
+        self.assertNotIn(" no permit ip any any", commands)
+        self.assertIn(" 65530 permit ip any any", commands)
+        self.assertIn(" 10 deny ip host 192.168.10.99 any log", commands)
+        self.assertIn(" 20 deny ip any host 192.168.10.99 log", commands)
+        # Anchor 65530 is added BEFORE ip access-group is bound to Gi0/0
+        self.assertLess(
+            commands.index(" 65530 permit ip any any"),
+            commands.index(" ip access-group ACL_ISOLATE_ATTACKER in"),
+        )
+
+    def test_acl_second_attacker_inserts_above_65530_without_removing_permit(self):
+        existing = (
+            "Extended IP access list ACL_ISOLATE_ATTACKER\n"
+            "    10 deny ip host 192.168.10.55 any log (12 matches)\n"
+            "    20 deny ip any host 192.168.10.55 log\n"
+            "    65530 permit ip any any (1420 matches)\n"
+        )
+        connection = self.connection([existing])
+        result = self.controller.ensure_attacker_isolated("192.168.10.66")
+        self.assertTrue(result.changed)
+        commands, = connection.send_config_set.call_args.args
+        self.assertNotIn(" no permit ip any any", commands)
+        self.assertNotIn(" 65530 permit ip any any", commands)
+        self.assertIn(" 30 deny ip host 192.168.10.66 any log", commands)
+        self.assertIn(" 40 deny ip any host 192.168.10.66 log", commands)
+
+    def test_acl_already_isolated_ip_is_idempotent_noop(self):
+        existing = (
+            "Extended IP access list ACL_ISOLATE_ATTACKER\n"
+            "    10 deny ip host 192.168.10.55 any log\n"
+            "    20 deny ip any host 192.168.10.55 log\n"
+            "    65530 permit ip any any\n"
+        )
+        connection = self.connection([existing])
+        result = self.controller.ensure_attacker_isolated("192.168.10.55")
+        self.assertFalse(result.changed)
+        connection.send_config_set.assert_not_called()
+
+    def test_acl_legacy_low_permit_migrates_fail_open_without_blackout(self):
+        legacy = (
+            "Extended IP access list ACL_ISOLATE_ATTACKER\n"
+            "    10 deny ip host 192.168.10.55 any log\n"
+            "    20 deny ip any host 192.168.10.55 log\n"
+            "    30 permit ip any any (85 matches)\n"
+        )
+        connection = self.connection([legacy])
+        result = self.controller.ensure_attacker_isolated("192.168.10.77")
+        self.assertTrue(result.changed)
+        commands, = connection.send_config_set.call_args.args
+        self.assertNotIn(" no permit ip any any", commands)
+        detach_idx = commands.index(" no ip access-group ACL_ISOLATE_ATTACKER in")
+        remove_low_idx = commands.index(" no 30")
+        anchor_idx = commands.index(" 65530 permit ip any any")
+        rebind_idx = len(commands) - 1 - commands[::-1].index(" ip access-group ACL_ISOLATE_ATTACKER in")
+        self.assertLess(detach_idx, remove_low_idx)
+        self.assertLess(anchor_idx, rebind_idx)
+        self.assertIn(" 40 deny ip host 192.168.10.77 any log", commands)
+        self.assertIn(" 50 deny ip any host 192.168.10.77 log", commands)
+
+    def test_acl_invalid_ip_is_rejected_before_opening_ssh(self):
+        session = patch.object(self.controller, "_session").start()
+        for bad_ip in ("", "not-an-ip", "192.168.10.999", "192.168.1.1\nno ip routing"):
+            with self.assertRaises(ValueError):
+                self.controller.isolate_attacker(bad_ip)
+        session.assert_not_called()
 
     def test_ssh_test_uses_single_device_session(self):
         connection = self.connection([])

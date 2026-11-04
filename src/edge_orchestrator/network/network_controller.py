@@ -1,6 +1,7 @@
 """Cisco SSH operations for one device, reached through the GNS3 jump host."""
 
 from contextlib import contextmanager
+import ipaddress
 import os
 import re
 import threading
@@ -31,6 +32,14 @@ DEVICE_ACCESS_MAP = {
 }
 CONFIG_ERROR_PATTERN = r"(?im)^\s*%\s*(?:Invalid|Incomplete|Ambiguous|Error|Unrecognized|Unknown)"
 QOS_SHOW_COMMAND = "show running-config | section policy-map TDTU_DYNAMIC_QOS"
+ACL_NAME = "ACL_ISOLATE_ATTACKER"
+ACL_INTERFACE = "GigabitEthernet0/0"
+ACL_PERMIT_ANCHOR_SEQ = 65530
+ACL_SHOW_COMMAND = f"show ip access-lists {ACL_NAME}"
+ACL_ACE_LINE_REGEX = re.compile(
+    r"^\s*(?P<seq>\d+)\s+(?P<rule>.+?)(?:\s*\(\d+\s+match(?:es)?\))?\s*$",
+    re.IGNORECASE,
+)
 
 
 class NetworkController:
@@ -237,20 +246,110 @@ class NetworkController:
         worker.start()
         return worker
 
+    @staticmethod
+    def _normalize_ipv4(attacker_ip) -> str:
+        text = str(attacker_ip or "").strip()
+        if not text:
+            raise ValueError("Địa chỉ IP cần cô lập không được rỗng")
+        try:
+            return str(ipaddress.IPv4Address(text))
+        except ValueError as error:
+            raise ValueError(f"Địa chỉ IPv4 không hợp lệ: {text}") from error
+
+    @staticmethod
+    def _allocate_acl_sequence(used_seqs: set[int]) -> int:
+        candidate = 10
+        while candidate < ACL_PERMIT_ANCHOR_SEQ:
+            if candidate not in used_seqs:
+                used_seqs.add(candidate)
+                return candidate
+            candidate += 10
+        raise RuntimeError(f"Hết sequence number trống trước mốc {ACL_PERMIT_ANCHOR_SEQ} trong {ACL_NAME}")
+
+    @classmethod
+    def _build_acl_isolation_commands(cls, attacker_ip: str, acl_output: str = "") -> list[str]:
+        ip = cls._normalize_ipv4(attacker_ip)
+        used_seqs: set[int] = set()
+        permit_seqs: list[int] = []
+        denied_out_seqs: list[int] = []
+        denied_in_seqs: list[int] = []
+
+        for raw_line in (acl_output or "").splitlines():
+            match = ACL_ACE_LINE_REGEX.match(raw_line)
+            if not match:
+                continue
+            seq = int(match.group("seq"))
+            rule_norm = " ".join(match.group("rule").lower().split())
+            used_seqs.add(seq)
+            if rule_norm == "permit ip any any":
+                permit_seqs.append(seq)
+            elif rule_norm.startswith(f"deny ip host {ip} any"):
+                denied_out_seqs.append(seq)
+            elif rule_norm.startswith(f"deny ip any host {ip}"):
+                denied_in_seqs.append(seq)
+
+        low_permit_seqs = [seq for seq in permit_seqs if seq < ACL_PERMIT_ANCHOR_SEQ]
+        has_anchor = ACL_PERMIT_ANCHOR_SEQ in permit_seqs
+        has_active_out = any(seq < ACL_PERMIT_ANCHOR_SEQ for seq in denied_out_seqs)
+        has_active_in = any(seq < ACL_PERMIT_ANCHOR_SEQ for seq in denied_in_seqs)
+
+        if not low_permit_seqs and has_anchor and has_active_out and has_active_in:
+            return []
+
+        used_seqs.add(ACL_PERMIT_ANCHOR_SEQ)
+        seq_out = None if has_active_out else cls._allocate_acl_sequence(used_seqs)
+        seq_in = None if has_active_in else cls._allocate_acl_sequence(used_seqs)
+
+        commands = [f"!--- AUTO-REMEDIATION: Isolate attacker {ip} ---"]
+        if low_permit_seqs:
+            # Fail-open migration: gỡ tạm ACL khỏi cổng trước khi dời dòng permit thấp xuống 65530
+            # để tuyệt đối không bao giờ rơi vào trạng thái implicit deny gây chớp đen lưu lượng.
+            commands.extend([
+                f"interface {ACL_INTERFACE}",
+                f" no ip access-group {ACL_NAME} in",
+            ])
+
+        commands.append(f"ip access-list extended {ACL_NAME}")
+        for low_seq in low_permit_seqs:
+            commands.append(f" no {low_seq}")
+        if not has_anchor:
+            commands.append(f" {ACL_PERMIT_ANCHOR_SEQ} permit ip any any")
+        if seq_out is not None:
+            commands.append(f" {seq_out} deny ip host {ip} any log")
+        if seq_in is not None:
+            commands.append(f" {seq_in} deny ip any host {ip} log")
+        commands.extend([
+            f"interface {ACL_INTERFACE}",
+            f" ip access-group {ACL_NAME} in",
+        ])
+        return commands
+
+    def ensure_attacker_isolated(self, attacker_ip, attacker_mac=None):
+        """Read current ACL state and insert sequenced deny rules above 65530 without micro-blackout."""
+        ip = self._normalize_ipv4(attacker_ip)
+        with self._session() as connection:
+            acl_output = connection.send_command(ACL_SHOW_COMMAND, read_timeout=15)
+            commands = self._build_acl_isolation_commands(ip, acl_output)
+            if not commands:
+                return PolicySyncResult("ACL", changed=False)
+            self._send_config(connection, commands)
+        return PolicySyncResult("ACL", changed=True)
+
+    def _run_isolate_attacker(self, attacker_ip, attacker_mac=None):
+        try:
+            result = self.ensure_attacker_isolated(attacker_ip, attacker_mac)
+            action = "đã cập nhật" if result.changed else "đã tồn tại"
+            print(f"[NETMIKO] {self.target_name}: ACL cô lập {attacker_ip} ({action}).")
+            return True
+        except Exception as error:
+            print(f"[NETMIKO] {self.target_name}: cô lập ACL {attacker_ip} thất bại: {error}")
+            return False
+
     def isolate_attacker(self, attacker_ip, attacker_mac=None):
-        commands = [
-            f"!--- AUTO-REMEDIATION: Isolate attacker {attacker_ip} ---",
-            "ip access-list extended ACL_ISOLATE_ATTACKER",
-            " no permit ip any any",
-            f" deny ip host {attacker_ip} any log",
-            f" deny ip any host {attacker_ip} log",
-            " permit ip any any",
-            "!",
-            "interface GigabitEthernet0/0",
-            " ip access-group ACL_ISOLATE_ATTACKER in",
-        ]
+        ip = self._normalize_ipv4(attacker_ip)
         worker = threading.Thread(
-            target=self._push_config, args=(commands,), daemon=True)
+            target=self._run_isolate_attacker, args=(ip, attacker_mac), daemon=True
+        )
         worker.start()
         return worker
 
