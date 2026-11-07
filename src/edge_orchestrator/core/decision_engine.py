@@ -22,19 +22,23 @@ class AIDecisionEngine:
     Sử dụng cơ chế Debounce để chống nhiễu (Flapping).
     """
 
-    def __init__(self, alert_trigger_sec=2.0, recover_trigger_sec=3.0):
-        self.alert_trigger_sec = alert_trigger_sec
-        self.recover_trigger_sec = recover_trigger_sec
+    def __init__(self, alert_trigger_sec=0.8, recover_trigger_sec=10.0, min_alert_confirmations=2):
+        self.alert_trigger_sec = float(alert_trigger_sec)
+        self.recover_trigger_sec = float(recover_trigger_sec)
+        self.min_alert_confirmations = max(1,int(min_alert_confirmations))
 
         self._current_state = "NORMAL"   # "NORMAL" | "ALERT"
         self._last_alert_time = None
+        self._alert_confirm_count = 0 
         self._last_normal_time = time.monotonic()
         self._lock = threading.Lock()
 
     @property
     def current_state(self):
         return self._current_state
-
+    @property
+    def alert_started_at(self) -> float | None:
+        return self._last_alert_time
     def update(self, person_detected: bool, log_callback=None) -> str | None:
         """
         Đánh giá trạng thái phát hiện người. Trả về state mới nếu có sự thay đổi.
@@ -43,24 +47,29 @@ class AIDecisionEngine:
 
         with self._lock:
             if person_detected:
-                # Đánh dấu thời điểm bắt đầu phát hiện người
                 if self._last_alert_time is None:
                     self._last_alert_time = now
+                self._alert_confirm_count += 1
                 self._last_normal_time = None
 
                 # Đủ thời gian Debounce chưa?
                 elapsed = now - self._last_alert_time
-                if elapsed >= self.alert_trigger_sec and self._current_state != "ALERT":
+                if (
+                    self._current_state != "ALERT"
+                    and self._alert_confirm_count >= self.min_alert_confirmations
+                    and elapsed >= self.alert_trigger_sec
+                ):
                     self._current_state = "ALERT"
                     if log_callback:
                         log_callback(
-                            f"[AI ENGINE] Phát hiện người liên tục trong {elapsed:.1f}s! KÍCH HOẠT CẢNH BÁO.",
-                            alert=True
+                            f"[AI ENGINE] Xác nhận xâm nhập ({self._alert_confirm_count} mẫu YOLO / {elapsed:.2f}s)! KÍCH HOẠT CẢNH BÁO.",
+                            alert=True,
                         )
                     return "ALERT"
             else:
                 # Không phát hiện người
                 self._last_alert_time = None
+                self._alert_confirm_count = 0
                 if self._last_normal_time is None:
                     self._last_normal_time = now
 

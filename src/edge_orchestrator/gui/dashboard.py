@@ -168,9 +168,11 @@ class MainDashboard(QWidget):
         self.qos_engine = QoSDecisionEngine(
             simulate=config.SIMULATE_TELEMETRY)
         self.ai_engine = AIDecisionEngine(
-            alert_trigger_sec=getattr(config, "ALERT_TRIGGER_SEC", 3),
-            recover_trigger_sec=getattr(config, "RECOVER_TRIGGER_SEC", 10),
+            alert_trigger_sec=getattr(config, "ALERT_TRIGGER_SEC", 0.8),
+            recover_trigger_sec=getattr(config, "RECOVER_TRIGGER_SEC", 10.0),
+            min_alert_confirmations=getattr(config, "ALERT_MIN_CONFIRMATIONS", 2),
         )
+        self._alert_e2e_start_mono = None
         self._ai_state = "NORMAL"
         self._ai_available = False
         self._network_state = "NORMAL"
@@ -230,7 +232,11 @@ class MainDashboard(QWidget):
             self.log_console(
                 "[TELEGRAM] Chưa bật: cần TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID.")
         self._device_last_syslog = {}
-        self._start_timers()
+        watchdog_ms = (
+            2000 if self.simulate_ai 
+            else getattr(config, "AI_WATCDOG_INTERVAL_MS"), 500
+        )
+        self.timer_ai.start(watchdog_ms)
 
         if not self.simulate_netmiko:
             self._start_snmp_bandwidth_worker()
@@ -518,7 +524,11 @@ class MainDashboard(QWidget):
         self.timer_sys = QTimer()
         self.timer_sys.timeout.connect(self._tick_syslog)
         self.timer_bw.start(1000)   # Băng thông mỗi 1s
-        self.timer_ai.start(2000)   # AI check mỗi 2s
+        watchdog_ms = (
+            2000 if self.simulate_ai
+            else getattr(config, "AI_WATCHDOG_INTERVAL_MS", 500)
+        )
+        self.timer_ai.start(watchdog_ms)
         self.timer_sys.start(500)   # Syslog check mỗi 0.5s
         self.timer_qos = QTimer(self)
         self.timer_qos.timeout.connect(self._tick_qos_sync)
@@ -886,28 +896,44 @@ class MainDashboard(QWidget):
 
         self._update_device_status_table(snapshot)
 
-    def _tick_ai(self):
-        if self.simulate_ai:
-            probability = getattr(
-                config,
-                "AI_PERSON_DETECT_PROB",
-                0.25,
-            )
-            person_detected = random.random() < probability
-            self._update_cam_frame(person_detected)
-        else:
-            if not self._ai_available:
-                return
-            person_detected = (
-                self._get_fresh_person_state()
-            )
-            if person_detected is None:
-                # Không coi dữ liệu hết hạn/chưa xác nhận là không có người
-                return
+    def _evaluate_live_ai_state(self):
+        if self.simulate_ai or not getattr(self, "_ai_available", False):
+            return
+        person_detected = self._get_fresh_person_state()
+        if person_detected is None:
+            return
+        # Lưu mốc thời gian bắt đầu phát hiện chuỗi xâm nhập để đo E2E latency
+        if person_detected and self._ai_state == "NORMAL" and self._alert_e2e_start_mono is None:
+            obs_map = getattr(self, "_ai_observations_by_camera", {})
+            positive_caps = [
+                item["observed_at"]
+                for item in obs_map.values()
+                if item.get("person_detected") and item.get("observed_at") is not None
+            ]
+            self._alert_e2e_start_mono = min(positive_caps) if positive_caps else time.monotonic()
+        elif not person_detected and self._ai_state == "NORMAL":
+            self._alert_e2e_start_mono = None
+
         ai_state_change = self.ai_engine.update(
-            person_detected, log_callback=lambda text, alert=False: self.log_console(text, alert),)
+            person_detected,
+            log_callback=lambda text, alert=False: self.log_console(text, alert),
+        )
         if ai_state_change is not None:
             self._on_ai_state_change(ai_state_change)
+
+    def _tick_ai(self):
+        if self.simulate_ai:
+            probability = getattr(config, "AI_PERSON_DETECT_PROB", 0.25)
+            person_detected = random.random() < probability
+            self._update_cam_frame(person_detected)
+            ai_state_change = self.ai_engine.update(
+                person_detected,
+                log_callback=lambda text, alert=False: self.log_console(text, alert),
+            )
+            if ai_state_change is not None:
+                self._on_ai_state_change(ai_state_change)
+            return
+        self._evaluate_live_ai_state()
 
     def _on_ai_state_change(self, state: str):
         previous_state = self._ai_state
@@ -932,6 +958,7 @@ class MainDashboard(QWidget):
             )
 
         elif state == "NORMAL":
+            self._alert_e2e_start_mono = None
             self.lbl_status.setText(
                 " Trạng thái AI: IDLE NORMAL"
             )
@@ -1258,10 +1285,12 @@ class MainDashboard(QWidget):
     def _on_qos_sync_result(self, event):
         if self._qos_closing:
             return
-        self.log_console(
-            f"[DYNAMIC QOS] [{event.device}] {event.message}",
-            alert=not event.success,
-        )
+        msg = f"[DYNAMIC QOS] [{event.device}] {event.message}"
+        start_mono = getattr(self, "_alert_e2e_start_mono", None)
+        if event.success and event.policy == "ALERT" and start_mono is not None:
+            e2e_ms = int((time.monotonic() - start_mono) * 1000)
+            msg += f" (Tổng phản ứng đầu-cuối: {e2e_ms} ms)"
+        self.log_console(msg,alert=not event.success)
 
     def _manual_qos(self, mode: str):
         policy = mode.upper()
@@ -1750,6 +1779,13 @@ class MainDashboard(QWidget):
         self._latest_ai_observation_at = now_mono
         self._latest_ai_event = event
 
+        if (
+            not getattr(self, "simulate_ai", True)
+            and getattr(self, "_ai_available", False)
+            and hasattr(self, "_evaluate_live_ai_state")
+        ):
+            self._evaluate_live_ai_state()
+
     def _get_fresh_person_state(self):
         now = time.monotonic()
         ttl = getattr(config, "AI_OBSERVATION_TTL_SEC", 3.5)
@@ -1821,6 +1857,9 @@ class MainDashboard(QWidget):
         if hasattr(self, "timer_qos"):
             self.timer_qos.stop()
         self.qos_sync.close(timeout_sec=1.0)
+        for controller in getattr(self, "network_controllers", {}).values():
+            if hasattr(controller, "close"):
+                controller.close()
         if hasattr(self, "timer_bw"):
             self.timer_bw.stop()
         if hasattr(self, "timer_ai"):

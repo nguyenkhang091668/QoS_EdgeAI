@@ -11,17 +11,24 @@ from edge_orchestrator.network.vrrp_status import parse_vrrp_brief
 
 try:
     from netmiko import ConnectHandler
+    from netmiko.exceptions import NetmikoTimeoutException
     NETMIKO_IMPORT_ERROR = None
+    _NETMIKO_TRANSPORT_EXCEPTIONS = (NetmikoTimeoutException,)
 except ImportError as error:
     ConnectHandler = None
     NETMIKO_IMPORT_ERROR = str(error)
+    _NETMIKO_TRANSPORT_EXCEPTIONS = ()
 
 try:
     import paramiko
     PARAMIKO_IMPORT_ERROR = None
+    _SSH_EXCEPTIONS = (paramiko.SSHException,)
 except ImportError as error:
     paramiko = None
     PARAMIKO_IMPORT_ERROR = str(error)
+    _SSH_EXCEPTIONS = ()
+
+TRANSPORT_ERRORS = (EOFError, OSError) + _SSH_EXCEPTIONS + _NETMIKO_TRANSPORT_EXCEPTIONS
 
 DEVICE_ACCESS_MAP = {
     "R1": {"ip": "192.168.122.197", "port": 22},
@@ -65,8 +72,11 @@ class NetworkController:
             "SSH_PASSWORD", "") if password is None else password
         self.secret = os.environ.get(
             "SSH_ENABLE_PASSWORD", "") if secret is None else secret
-        # Serialize this device's ACL/legacy operations with its QoS worker only.
         self._io_lock = threading.Lock()
+        self._jump_client = None
+        self._channel = None
+        self._connection = None
+        self._last_verified_policy = None
 
     def _create_jump_socket(self):
         jump_ip = os.environ.get("JUMP_IP", "").strip()
@@ -84,12 +94,9 @@ class NetworkController:
             )
             transport = jump_client.get_transport()
             if transport is None or not transport.is_active():
-                raise ConnectionError(
-                    "SSH transport tới Jump Host không hoạt động")
-            channel = transport.open_channel(
-                "direct-tcpip", (self.target_ip, self.target_port),
-                ("127.0.0.1", 0), timeout=10,
-            )
+                raise ConnectionError("SSH transport tới Jump Host không hoạt động")
+            transport.set_keepalive(25)
+            channel = transport.open_channel("direct-tcpip", (self.target_ip, self.target_port),("127.0.0.1", 0), timeout=10)
             return channel, jump_client
         except Exception:
             jump_client.close()
@@ -111,15 +118,59 @@ class NetworkController:
             "disabled_algorithms": {"pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]},
         }
 
-    @contextmanager
-    def _session(self):
-        with self._io_lock:
-            channel = jump_client = None
+    def _is_session_alive_unlocked(self) -> bool:
+        if self._connection is None or self._channel is None or self._jump_client is None:
+            return False
+        transport = self._jump_client.get_transport()
+        if transport is None or not transport.is_active():
+            return False
+        if getattr(self._channel, "closed", True) or getattr(self._channel, "eof_received", False):
+            return False
+        return True
+
+    def _close_session_unlocked(self):
+        conn, channel, jump_client = self._connection, self._channel, self._jump_client
+        self._connection = self._channel = self._jump_client = None
+        self._last_verified_policy = None
+        try:
+            if conn is not None:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+        finally:
             try:
-                channel, jump_client = self._create_jump_socket()
-                with ConnectHandler(**self._get_device_config(channel)) as connection:
-                    connection.enable()
-                    yield connection
+                if channel is not None:
+                    channel.close()
+            finally:
+                if jump_client is not None:
+                    jump_client.close()
+
+    def close(self):
+        """Giải phóng phiên SSH ấm và trả lại line VTY cho Router khi tắt ứng dụng."""
+        with self._io_lock:
+            self._close_session_unlocked()
+
+    def _acquire_connection_unlocked(self) -> tuple[object, bool]:
+        if self._is_session_alive_unlocked():
+            return self._connection, True
+        self._close_session_unlocked()
+        channel = jump_client = conn = None
+        try:
+            channel, jump_client = self._create_jump_socket()
+            conn = ConnectHandler(**self._get_device_config(channel))
+            conn.enable()
+            self._channel = channel
+            self._jump_client = jump_client
+            self._connection = conn
+            return conn, False
+        except Exception:
+            try:
+                if conn is not None:
+                    try:
+                        conn.disconnect()
+                    except Exception:
+                        pass
             finally:
                 try:
                     if channel is not None:
@@ -127,7 +178,73 @@ class NetworkController:
                 finally:
                     if jump_client is not None:
                         jump_client.close()
+            raise
 
+    @contextmanager
+    def _session(self, *, persistent: bool = True):
+        with self._io_lock:
+            conn, _ = self._acquire_connection_unlocked()
+            try:
+                yield conn
+            except TRANSPORT_ERRORS:
+                self._close_session_unlocked()
+                raise
+            except Exception:
+                if not persistent:
+                    self._close_session_unlocked()
+                raise
+            else:
+                if not persistent:
+                    self._close_session_unlocked()
+
+    def ensure_qos_policy(self, policy):
+        policy = policy.upper()
+        if policy not in {"NORMAL", "ALERT"}:
+            raise ValueError(f"Policy không hợp lệ: {policy}")
+        bandwidth = 8000 if policy == "ALERT" else 1000
+
+        for attempt in range(2):
+            reused_warm = False
+            try:
+                with self._io_lock:
+                    reused_warm = self._is_session_alive_unlocked()
+                with self._session() as connection:
+                    # Fast-Path: Nếu phiên ấm đã xác minh trạng thái cũ khác trạng thái mới,
+                    # đẩy thẳng cấu hình rồi xác minh hậu kiểm để tiết kiệm ~300ms đọc NVRAM.
+                    skip_preread = (
+                        reused_warm
+                        and self._last_verified_policy is not None
+                        and self._last_verified_policy != policy
+                    )
+                    if not skip_preread:
+                        current = connection.send_command(QOS_SHOW_COMMAND, read_timeout=15)
+                        if self._camera_policy_matches(current, bandwidth):
+                            self._last_verified_policy = policy
+                            return PolicySyncResult(policy, changed=False)
+
+                    commands = [
+                        "policy-map TDTU_DYNAMIC_QOS",
+                        " class CAMERA_CLASS",
+                        f"  bandwidth {bandwidth}",
+                        "  set ip dscp af41",
+                        " class class-default",
+                        "  fair-queue",
+                    ]
+                    self._send_config(connection, commands)
+                    verified = connection.send_command(QOS_SHOW_COMMAND, read_timeout=15)
+                    if not self._camera_policy_matches(verified, bandwidth):
+                        self._last_verified_policy = None
+                        raise RuntimeError(
+                            f"{self.target_name}: cấu hình đọc lại không khớp {policy} "
+                            f"(CAMERA_CLASS={bandwidth} kbps, DSCP AF41)"
+                        )
+                    self._last_verified_policy = policy
+                    return PolicySyncResult(policy, changed=True)
+            except TRANSPORT_ERRORS:
+                # Chỉ thử kết nối lại ngay nếu lỗi xảy ra trên phiên ấm cũ bị đứt ngầm
+                if attempt == 0 and reused_warm:
+                    continue
+                raise
     @staticmethod
     def _send_config(connection, commands):
         output = connection.send_config_set(
@@ -191,39 +308,6 @@ class NetworkController:
                 dscp_ok |= bool(re.fullmatch(
                     r"set (?:ip )?dscp (?:af41|34)", line))
         return bandwidth_ok and dscp_ok
-
-    def ensure_qos_policy(self, policy):
-        """Read, update if needed, and read back on the same SSH session.
-
-        Exceptions propagate to the synchronizer so the GUI gets the real failure.
-        Even when the local cache matches, this read detects restarts/config drift.
-        """
-        policy = policy.upper()
-        if policy not in {"NORMAL", "ALERT"}:
-            raise ValueError(f"Policy không hợp lệ: {policy}")
-        bandwidth = 8000 if policy == "ALERT" else 1000
-        with self._session() as connection:
-            current = connection.send_command(
-                QOS_SHOW_COMMAND, read_timeout=15)
-            if self._camera_policy_matches(current, bandwidth):
-                return PolicySyncResult(policy, changed=False)
-            commands = [
-                "policy-map TDTU_DYNAMIC_QOS",
-                " class CAMERA_CLASS",
-                f"  bandwidth {bandwidth}",
-                "  set ip dscp af41",
-                " class class-default",
-                "  fair-queue",
-            ]
-            self._send_config(connection, commands)
-            verified = connection.send_command(
-                QOS_SHOW_COMMAND, read_timeout=15)
-            if not self._camera_policy_matches(verified, bandwidth):
-                raise RuntimeError(
-                    f"{self.target_name}: cấu hình đọc lại không khớp {policy} "
-                    f"(CAMERA_CLASS={bandwidth} kbps, DSCP AF41)"
-                )
-        return PolicySyncResult(policy, changed=True)
 
     def set_qos_policy(self, policy):
         """Compatibility helper; synchronous, with read-back verification."""
@@ -327,13 +411,22 @@ class NetworkController:
     def ensure_attacker_isolated(self, attacker_ip, attacker_mac=None):
         """Read current ACL state and insert sequenced deny rules above 65530 without micro-blackout."""
         ip = self._normalize_ipv4(attacker_ip)
-        with self._session() as connection:
-            acl_output = connection.send_command(ACL_SHOW_COMMAND, read_timeout=15)
-            commands = self._build_acl_isolation_commands(ip, acl_output)
-            if not commands:
-                return PolicySyncResult("ACL", changed=False)
-            self._send_config(connection, commands)
-        return PolicySyncResult("ACL", changed=True)
+        for attempt in range(2):
+            reused_warm = False
+            try:
+                with self._io_lock:
+                    reused_warm = self._is_session_alive_unlocked()
+                with self._session() as connection:
+                    acl_output = connection.send_command(ACL_SHOW_COMMAND, read_timeout=15)
+                    commands = self._build_acl_isolation_commands(ip, acl_output)
+                    if not commands:
+                        return PolicySyncResult("ACL", changed=False)
+                    self._send_config(connection, commands)
+                    return PolicySyncResult("ACL", changed=True)
+            except TRANSPORT_ERRORS:
+                if attempt == 0 and reused_warm:
+                    continue
+                raise
 
     def _run_isolate_attacker(self, attacker_ip, attacker_mac=None):
         try:

@@ -62,10 +62,10 @@ class NetworkControllerTests(unittest.TestCase):
     def test_jump_is_closed_even_if_channel_cleanup_raises(self):
         channel, jump = MagicMock(), MagicMock()
         channel.close.side_effect = OSError("channel already closed")
-        self.netmiko.return_value.__enter__.return_value = MagicMock()
+        self.netmiko.return_value = MagicMock()
         with patch.object(self.controller, "_create_jump_socket", return_value=(channel, jump)):
             with self.assertRaises(OSError):
-                with self.controller._session():
+                with self.controller._session(persistent=False):
                     pass
         jump.close.assert_called_once()
 
@@ -205,6 +205,75 @@ class NetworkControllerTests(unittest.TestCase):
         connection.find_prompt.return_value = "R1#"
         self.assertTrue(self.controller.test_ssh_connection())
         connection.find_prompt.assert_called_once()
+
+    def test_warm_session_reuses_ssh_channel_and_close_releases_vty(self):
+        channel, jump = MagicMock(closed=False, eof_received=False), MagicMock()
+        jump.get_transport.return_value.is_active.return_value = True
+        conn = MagicMock()
+        conn.send_command.side_effect = [config(1000), config(1000)]
+        self.netmiko.return_value = conn
+
+        with patch.object(self.controller, "_create_jump_socket", return_value=(channel, jump)) as create_jump:
+            self.assertFalse(self.controller.ensure_qos_policy("NORMAL").changed)
+            self.assertFalse(self.controller.ensure_qos_policy("NORMAL").changed)
+            create_jump.assert_called_once()
+            self.netmiko.assert_called_once()
+            channel.close.assert_not_called()
+            jump.close.assert_not_called()
+
+            self.controller.close()
+            conn.disconnect.assert_called_once()
+            channel.close.assert_called_once()
+            jump.close.assert_called_once()
+
+    def test_warm_session_fast_path_skips_preread_on_policy_transition(self):
+        channel, jump = MagicMock(closed=False, eof_received=False), MagicMock()
+        jump.get_transport.return_value.is_active.return_value = True
+        conn = MagicMock()
+        conn.send_command.side_effect = [
+            config(1000),  # Boot verification -> caches NORMAL
+            config(8000),  # Post-write readback only during NORMAL -> ALERT Fast-Path!
+        ]
+        conn.send_config_set.return_value = "configuration accepted"
+        self.netmiko.return_value = conn
+
+        with patch.object(self.controller, "_create_jump_socket", return_value=(channel, jump)):
+            boot = self.controller.ensure_qos_policy("NORMAL")
+            self.assertFalse(boot.changed)
+            self.assertEqual(conn.send_command.call_count, 1)
+
+            alert = self.controller.ensure_qos_policy("ALERT")
+            self.assertTrue(alert.changed)
+            # Only 1 additional send_command (post-verify), skipping the redundant pre-read!
+            self.assertEqual(conn.send_command.call_count, 2)
+
+    def test_stale_warm_session_transparently_reconnects_once_on_eof(self):
+        ch1, jump1 = MagicMock(closed=False, eof_received=False), MagicMock()
+        jump1.get_transport.return_value.is_active.return_value = True
+        conn1 = MagicMock()
+        conn1.send_command.side_effect = [config(1000), EOFError("VTY exec-timeout")]
+
+        ch2, jump2 = MagicMock(closed=False, eof_received=False), MagicMock()
+        jump2.get_transport.return_value.is_active.return_value = True
+        conn2 = MagicMock()
+        conn2.send_command.side_effect = [config(1000), config(8000)]
+        conn2.send_config_set.return_value = "configuration accepted"
+
+        self.netmiko.side_effect = [conn1, conn2]
+        with patch.object(
+            self.controller,
+            "_create_jump_socket",
+            side_effect=[(ch1, jump1), (ch2, jump2)],
+        ) as create_jump:
+            self.controller.ensure_qos_policy("NORMAL")
+            # Next call hits EOFError on conn1, purges conn1, reconnects conn2, and succeeds!
+            # Note: force non-fast-path read on conn1 by checking NORMAL again or ALERT
+            self.controller._last_verified_policy = "ALERT"
+            result = self.controller.ensure_qos_policy("ALERT")
+            self.assertTrue(result.changed)
+            self.assertEqual(create_jump.call_count, 2)
+            ch1.close.assert_called_once()
+            jump1.close.assert_called_once()
 
 
 if __name__ == "__main__":

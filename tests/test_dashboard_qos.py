@@ -145,6 +145,90 @@ class DashboardQoSTests(unittest.TestCase):
         self.assertIn("R2", self.dashboard.network_controllers)
         self.assertEqual(self.dashboard._network_controller_errors["R1"], "R1 init failed")
 
+    def test_fast_attack_slow_release_filters_single_frame_and_transient_glimpse(self):
+        from unittest.mock import patch
+        from edge_orchestrator.core.decision_engine import AIDecisionEngine
+
+        engine = AIDecisionEngine(
+            alert_trigger_sec=0.8,
+            recover_trigger_sec=10.0,
+            min_alert_confirmations=2,
+        )
+        # 1) Single YOLO hallucination frame followed by delay must NOT trigger ALERT
+        with patch("edge_orchestrator.core.decision_engine.time.monotonic", side_effect=[100.0, 100.0, 101.2]):
+            engine = AIDecisionEngine(alert_trigger_sec=0.8, recover_trigger_sec=10.0, min_alert_confirmations=2)
+            self.assertIsNone(engine.update(True))
+            # Only 1 confirmation so far; if person leaves at 101.2s -> stays NORMAL
+            self.assertIsNone(engine.update(False))
+            self.assertEqual(engine.current_state, "NORMAL")
+
+        # 2) Accidental transient step-in (< 0.8s) even with 2 frames must NOT trigger ALERT
+        with patch("edge_orchestrator.core.decision_engine.time.monotonic", side_effect=[200.0, 200.0, 200.4, 200.7]):
+            engine = AIDecisionEngine(alert_trigger_sec=0.8, recover_trigger_sec=10.0, min_alert_confirmations=2)
+            self.assertIsNone(engine.update(True))   # t=200.0, count=1
+            self.assertIsNone(engine.update(True))   # t=200.4, count=2, elapsed=0.4 < 0.8
+            self.assertIsNone(engine.update(False))  # stepped back out at t=200.7 -> reset!
+            self.assertEqual(engine.current_state, "NORMAL")
+
+        # 3) Real intruder (>= 2 frames and >= 0.8s) triggers Fast-Attack ALERT, then holds Slow-Release 10s
+        with patch(
+            "edge_orchestrator.core.decision_engine.time.monotonic",
+            side_effect=[300.0, 300.0, 300.45, 300.85, 301.5, 309.0, 311.6],
+        ):
+            engine = AIDecisionEngine(alert_trigger_sec=0.8, recover_trigger_sec=10.0, min_alert_confirmations=2)
+            self.assertIsNone(engine.update(True))           # t=300.0, count=1
+            self.assertIsNone(engine.update(True))           # t=300.45, count=2, elapsed=0.45
+            self.assertEqual(engine.update(True), "ALERT")   # t=300.85, count=3, elapsed=0.85 -> ALERT!
+            self.assertIsNone(engine.update(False))          # t=301.5, leaves frame
+            self.assertIsNone(engine.update(False))          # t=309.0, elapsed=7.5s < 10.0s -> still ALERT
+            self.assertEqual(engine.update(False), "NORMAL") # t=311.6, elapsed=10.1s >= 10.0s -> NORMAL!
+
+    def test_event_driven_ai_observation_triggers_qos_and_logs_e2e_ms(self):
+        from unittest.mock import patch
+        from edge_orchestrator.core.decision_engine import AIDecisionEngine
+        import edge_orchestrator.core.config as real_config
+
+        extra_ns = {"config": real_config, "time": time}
+        for name in ("_get_fresh_person_state", "_evaluate_live_ai_state"):
+            node = next(n for n in DASHBOARD.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            exec(compile(ast.Module(body=[node], type_ignores=[]), "dashboard.py", "exec"), extra_ns)
+
+        d = self.dashboard
+        d.simulate_ai = False
+        d._ai_available = True
+        d._active_ai_cameras = {"CAM03"}
+        d._ai_observations_by_camera = {}
+        d._latest_person_detected = False
+        d._latest_ai_observation_at = None
+        d._latest_ai_event = None
+        d._alert_e2e_start_mono = None
+        d.ai_engine = AIDecisionEngine(alert_trigger_sec=0.8, recover_trigger_sec=10.0, min_alert_confirmations=2)
+        d._get_fresh_person_state = extra_ns["_get_fresh_person_state"].__get__(d, DashboardHarness)
+        d._evaluate_live_ai_state = extra_ns["_evaluate_live_ai_state"].__get__(d, DashboardHarness)
+
+        def on_ai_state_change(state):
+            d._ai_state = state
+            if state == "NORMAL":
+                d._alert_e2e_start_mono = None
+            d._recalculate_target_policy()
+
+        d._on_ai_state_change = on_ai_state_change
+
+        with patch("time.monotonic", return_value=500.0):
+            d._on_ai_observation(True, {"source_id": "CAM03", "frame_id": 1, "captured_at": 500.0})
+        d.qos_sync.set_desired_policy.assert_not_called()
+
+        with patch("time.monotonic", return_value=500.85):
+            d._on_ai_observation(True, {"source_id": "CAM03", "frame_id": 2, "captured_at": 500.85})
+        # Immediately triggered QoS ALERT without waiting for any QTimer tick!
+        d.qos_sync.set_desired_policy.assert_called_once_with("ALERT")
+        d.qos_sync.reconcile.assert_called_once()
+
+        with patch("time.monotonic", return_value=501.42):
+            d._on_qos_sync_result(QoSSyncEvent("R1", "ALERT", True, "Đã áp dụng và xác minh ALERT, CAMERA_CLASS=8000 kbps."))
+        logged_msg = d.log_console.call_args.args[0]
+        self.assertIn("Tổng phản ứng đầu-cuối: 1420 ms", logged_msg)
+
 
 if __name__ == "__main__":
     unittest.main()

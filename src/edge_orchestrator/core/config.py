@@ -272,8 +272,8 @@ AI_CONFIDENCE = 0.5
 AI_THREADS = int(os.environ.get("AI_THREADS", "2"))
 AI_OBSERVATION_TTL_SEC = 3.5
 AI_MAX_BOX_AGE_SEC = float(os.environ.get("AI_MAX_BOX_AGE_SEC", "2.0"))
-AI_ACTIVE_RECHECK_SEC = float(os.environ.get("AI_ACTIVE_RECHECK_SEC", "0.8"))
-AI_IDLE_RECHECK_SEC = float(os.environ.get("AI_IDLE_RECHECK_SEC", "1.5"))
+AI_ACTIVE_RECHECK_SEC = float(os.environ.get("AI_ACTIVE_RECHECK_SEC", "0.4"))
+AI_IDLE_RECHECK_SEC = float(os.environ.get("AI_IDLE_RECHECK_SEC", "1.2"))
 EDGE_MODEL_PATH = os.environ.get("EDGE_MODEL_PATH")
 
 # ==============================================================================
@@ -299,10 +299,12 @@ TELEMETRY_PORTS = {
 SIMULATE_TELEMETRY = False
 
 # ==============================================================================
-# [BƯỚC 7] DEBOUNCE LOGIC
+# [BƯỚC 7] DEBOUNCE LOGIC (BẤT ĐỐI XỨNG: FAST-ATTACK / SLOW-RELEASE)
 # ==============================================================================
-ALERT_TRIGGER_SEC = 3    # Phát hiện người ≥ 3 giây → ALERT
-RECOVER_TRIGGER_SEC = 10   # Không phát hiện ≥ 10 giây → NORMAL
+ALERT_TRIGGER_SEC = float(os.environ.get("ALERT_TRIGGER_SEC", "0.8"))
+ALERT_MIN_CONFIRMATIONS = int(os.environ.get("ALERT_MIN_CONFIRMATIONS", "2"))
+RECOVER_TRIGGER_SEC = float(os.environ.get("RECOVER_TRIGGER_SEC", "10.0"))
+AI_WATCHDOG_INTERVAL_MS = int(os.environ.get("AI_WATCHDOG_INTERVAL_MS", "500"))
 
 # ==============================================================================
 # [BƯỚC 8] BANDWIDTH QoS - LÝ THUYẾT & HỌC THUẬT
