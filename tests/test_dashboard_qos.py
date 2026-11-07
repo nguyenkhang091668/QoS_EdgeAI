@@ -229,6 +229,37 @@ class DashboardQoSTests(unittest.TestCase):
         logged_msg = d.log_console.call_args.args[0]
         self.assertIn("Tổng phản ứng đầu-cuối: 1420 ms", logged_msg)
 
+    def test_dashboard_init_and_config_attributes_exist(self):
+        import edge_orchestrator.core.config as real_config
+
+        init_node = next(n for n in DASHBOARD.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        init_calls = {
+            call.func.attr
+            for call in ast.walk(init_node)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "self"
+        }
+        self.assertIn("_start_timers", init_calls)
+
+        for node in ast.walk(DASHBOARD):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "config"
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)
+            ):
+                attr_name = node.args[1].value
+                self.assertTrue(
+                    hasattr(real_config, attr_name),
+                    f"config.py thiếu thuộc tính '{attr_name}' được gọi trong dashboard.py",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

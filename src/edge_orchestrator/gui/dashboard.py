@@ -232,11 +232,7 @@ class MainDashboard(QWidget):
             self.log_console(
                 "[TELEGRAM] Chưa bật: cần TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID.")
         self._device_last_syslog = {}
-        watchdog_ms = (
-            2000 if self.simulate_ai 
-            else getattr(config, "AI_WATCDOG_INTERVAL_MS"), 500
-        )
-        self.timer_ai.start(watchdog_ms)
+        self._start_timers()
 
         if not self.simulate_netmiko:
             self._start_snmp_bandwidth_worker()
