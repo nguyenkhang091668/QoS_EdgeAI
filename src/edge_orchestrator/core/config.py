@@ -270,10 +270,16 @@ LOCAL_CAMERAS = {
 }
 AI_CONFIDENCE = 0.5
 AI_THREADS = int(os.environ.get("AI_THREADS", "2"))
-AI_OBSERVATION_TTL_SEC = 3.5
-AI_MAX_BOX_AGE_SEC = float(os.environ.get("AI_MAX_BOX_AGE_SEC", "2.0"))
+AI_OBSERVATION_TTL_SEC = float(os.environ.get("AI_OBSERVATION_TTL_SEC", "4.5"))
+AI_MAX_BOX_AGE_SEC = float(os.environ.get("AI_MAX_BOX_AGE_SEC", "2.4"))
 AI_ACTIVE_RECHECK_SEC = float(os.environ.get("AI_ACTIVE_RECHECK_SEC", "0.4"))
-AI_IDLE_RECHECK_SEC = float(os.environ.get("AI_IDLE_RECHECK_SEC", "1.2"))
+AI_ALERT_HOLD_RECHECK_SEC = float(
+    os.environ.get("AI_ALERT_HOLD_RECHECK_SEC", "1.0")
+)
+AI_IDLE_RECHECK_SEC = float(os.environ.get("AI_IDLE_RECHECK_SEC", "2.5"))
+GUI_PREVIEW_MAX_FPS = float(os.environ.get("GUI_PREVIEW_MAX_FPS", "20.0"))
+GUI_PREVIEW_MAX_WIDTH = int(os.environ.get("GUI_PREVIEW_MAX_WIDTH", "480"))
+GUI_PREVIEW_MAX_HEIGHT = int(os.environ.get("GUI_PREVIEW_MAX_HEIGHT", "360"))
 EDGE_MODEL_PATH = os.environ.get("EDGE_MODEL_PATH")
 
 # ==============================================================================

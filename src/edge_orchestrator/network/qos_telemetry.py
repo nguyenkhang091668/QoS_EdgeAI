@@ -1,4 +1,5 @@
 import subprocess
+import threading
 import time
 import json
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -16,80 +17,200 @@ class QoSTelemetryWorker(QThread):
     telemetry_signal = pyqtSignal(list)
     collector_error_signal = pyqtSignal(str)
 
+    # Tái khởi động nhẹ phiên tshark mỗi 5 phút (thay vì mỗi 2 giây -> giảm 150x số lần fork)
+    # để giải phóng bộ đệm tạm của dumpcap/wireshark khi chạy 24/7.
+    STREAM_SESSION_DURATION_SEC = 300
+
     def __init__(self, simulate=True):
         super().__init__()
         self.simulate = simulate
         self.running = True
+        self._stop_event = threading.Event()
+        self._proc_lock = threading.Lock()
+        self._process = None
 
     def run(self):
-        while self.running:
+        self._stop_event.clear()
+        while self.running and not self._stop_event.is_set():
             if self.simulate:
                 # Không phát dữ liệu giả.
                 # BandwidthStore sẽ tự chuyển nguồn
                 # sang STALE và biểu đồ để khoảng trống.
-                time.sleep(
-                    BANDWIDTH_POLL_INTERVAL_SEC
-                )
+                self._stop_event.wait(BANDWIDTH_POLL_INTERVAL_SEC)
                 continue
-            else:
-                try:
-                    metrics = self.get_qos_metrics()
-                except Exception as error:
-                    self.collector_error_signal.emit(str(error))
-                    time.sleep(BANDWIDTH_POLL_INTERVAL_SEC)
-                    continue
-                self.telemetry_signal.emit(metrics)
+
+            try:
+                self._run_streaming_session()
+            except Exception as error:
+                if not self.running or self._stop_event.is_set():
+                    break
+                self.collector_error_signal.emit(str(error))
+                self._stop_event.wait(BANDWIDTH_POLL_INTERVAL_SEC)
 
     def stop(self):
         self.running = False
+        self._stop_event.set()
+        self._terminate_active_process()
 
-    def get_qos_metrics(self):
+    def _terminate_active_process(self):
+        with self._proc_lock:
+            proc = self._process
+            self._process = None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _build_tshark_cmd(*, duration_sec: float, line_buffered: bool = False):
         ports = list(TELEMETRY_PORTS.keys())
-
-        capture_duration_sec = float(
-            BANDWIDTH_POLL_INTERVAL_SEC
-        )
-
         d_args = []
         for port in ports:
-            d_args.extend(
-                [
-                    "-d",
-                    f"udp.port=={port},rtp",
-                ]
+            d_args.extend(["-d", f"udp.port=={port},rtp"])
+
+        port_filter = " or ".join(f"udp dst port {port}" for port in ports)
+        capture_filter = f"dst host {TAILSCALE_IP_PI4} and ({port_filter})"
+
+        cmd = ["tshark"]
+        if line_buffered:
+            cmd.extend(["-l", "-n"])
+        cmd.extend(
+            [
+                "-p",
+                "-i",
+                TAILSCALE_INTERFACE,
+                *d_args,
+                "-f",
+                capture_filter,
+                "-a",
+                f"duration:{duration_sec:g}",
+                "-T",
+                "fields",
+                "-e",
+                "udp.dstport",
+                "-e",
+                "frame.len",
+                "-e",
+                "rtp.seq",
+                "-e",
+                "frame.time_relative",
+            ]
+        )
+        return cmd
+
+    def _run_streaming_session(self):
+        window_sec = max(0.2, float(BANDWIDTH_POLL_INTERVAL_SEC))
+        session_sec = max(window_sec * 2.0, float(self.STREAM_SESSION_DURATION_SEC))
+        cmd = self._build_tshark_cmd(
+            duration_sec=session_sec,
+            line_buffered=True,
+        )
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
             )
+        except OSError as error:
+            raise RuntimeError(f"Không thể chạy Tshark: {error}") from error
 
-        port_filter = " or ".join(
-            f"udp dst port {port}"
-            for port in ports
+        with self._proc_lock:
+            if not self.running or self._stop_event.is_set():
+                proc.terminate()
+                return
+            self._process = proc
+
+        line_buffer = []
+        buffer_lock = threading.Lock()
+        reader_done = threading.Event()
+
+        def _stdout_reader():
+            try:
+                if proc.stdout is not None:
+                    for raw_line in proc.stdout:
+                        if raw_line:
+                            with buffer_lock:
+                                line_buffer.append(raw_line)
+            except Exception:
+                pass
+            finally:
+                reader_done.set()
+
+        reader_thread = threading.Thread(
+            target=_stdout_reader,
+            name="tshark-stream-reader",
+            daemon=True,
         )
+        reader_thread.start()
 
-        capture_filter = (
-            f"dst host {TAILSCALE_IP_PI4} "
-            f"and ({port_filter})"
+        try:
+            window_start = time.monotonic()
+            next_tick = window_start + window_sec
+
+            while self.running and not self._stop_event.is_set():
+                wait_sec = max(0.0, next_tick - time.monotonic())
+                if self._stop_event.wait(wait_sec):
+                    break
+
+                now_mono = time.monotonic()
+                elapsed = max(0.2, now_mono - window_start)
+                window_start = now_mono
+                next_tick = now_mono + window_sec
+
+                with buffer_lock:
+                    batch_lines = list(line_buffer)
+                    line_buffer.clear()
+
+                retcode = proc.poll()
+                if retcode is not None:
+                    reader_done.wait(timeout=0.2)
+                    with buffer_lock:
+                        if line_buffer:
+                            batch_lines.extend(line_buffer)
+                            line_buffer.clear()
+
+                    if retcode != 0 and self.running and not self._stop_event.is_set():
+                        stderr_txt = ""
+                        if proc.stderr is not None:
+                            try:
+                                stderr_txt = proc.stderr.read().strip()
+                            except Exception:
+                                stderr_txt = ""
+                        raise RuntimeError(
+                            stderr_txt or f"Tshark exit code {retcode}"
+                        )
+
+                    # Phiên 5 phút kết thúc sạch (returncode == 0): phát nốt mẫu nếu có rồi mở phiên mới
+                    if batch_lines:
+                        metrics = self.compute_metrics_from_lines(
+                            batch_lines, elapsed
+                        )
+                        self.telemetry_signal.emit(metrics)
+                    break
+
+                metrics = self.compute_metrics_from_lines(batch_lines, elapsed)
+                self.telemetry_signal.emit(metrics)
+        finally:
+            self._terminate_active_process()
+            reader_done.wait(timeout=0.3)
+
+    def get_qos_metrics(self):
+        capture_duration_sec = float(BANDWIDTH_POLL_INTERVAL_SEC)
+        cmd = self._build_tshark_cmd(
+            duration_sec=capture_duration_sec,
+            line_buffered=False,
         )
-
-        cmd = [
-            "tshark",
-            "-p",
-            "-i",
-            TAILSCALE_INTERFACE,
-            *d_args,
-            "-f",
-            capture_filter,
-            "-a",
-            f"duration:{capture_duration_sec:g}",
-            "-T",
-            "fields",
-            "-e",
-            "udp.dstport",
-            "-e",
-            "frame.len",
-            "-e",
-            "rtp.seq",
-            "-e",
-            "frame.time_relative",
-        ]
         try:
             process = subprocess.Popen(
                 cmd,
@@ -103,12 +224,16 @@ class QoSTelemetryWorker(QThread):
         if process.returncode != 0:
             error_text = stderr.strip()
             if not error_text:
-                error_text = (
-                    f"Tshark exit code "
-                    f"{process.returncode}"
-                )
+                error_text = f"Tshark exit code {process.returncode}"
             raise RuntimeError(error_text)
-        lines = stdout.strip().split("\n")
+        lines = stdout.strip().split("\n") if stdout else []
+        return self.compute_metrics_from_lines(lines, capture_duration_sec)
+
+    @staticmethod
+    def compute_metrics_from_lines(lines, capture_duration_sec: float, telemetry_ports=None):
+        ports_cfg = telemetry_ports if telemetry_ports is not None else TELEMETRY_PORTS
+        ports = list(ports_cfg.keys())
+        duration = max(1e-3, float(capture_duration_sec))
 
         # Khởi tạo dữ liệu cho tất cả các cổng
         data_by_port = {
@@ -117,7 +242,7 @@ class QoSTelemetryWorker(QThread):
         }
 
         for line in lines:
-            if not line.strip():
+            if not line or not line.strip():
                 continue
             parts = (
                 [p.strip() for p in line.split("\t")]
@@ -148,7 +273,7 @@ class QoSTelemetryWorker(QThread):
                         pass
 
         results = []
-        for port, info in TELEMETRY_PORTS.items():
+        for port, info in ports_cfg.items():
             total_bytes = data_by_port[port]["bytes"]
             packets = sorted(
                 data_by_port[port]["packets"], key=lambda item: item[0]
@@ -157,7 +282,7 @@ class QoSTelemetryWorker(QThread):
 
             # 1. Tính Bitrate (Mbps)
             bitrate_mbps = round(
-                (total_bytes * 8 / capture_duration_sec / 1_000_000), 3
+                (total_bytes * 8 / duration / 1_000_000), 3
             )
 
             # 2. Tính Tỷ lệ Mất gói Packet Loss (%) có bù gói gộp UDP GRO (Len > 1400)

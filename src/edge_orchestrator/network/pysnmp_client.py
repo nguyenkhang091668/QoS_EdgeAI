@@ -198,6 +198,86 @@ class PySnmpV3Client:
                 f"{if_index} on {host}: {error}"
             ) from error
 
+    def resolve_if_indices(
+        self,
+        host,
+        interface_names,
+    ):
+        """Duyệt IF-MIB::ifName đúng 1 lần trên host để phân giải cùng lúc nhiều cổng."""
+        host = self._require_text("host", host)
+        cleaned_names = [
+            self._require_text("interface_name", name)
+            for name in interface_names
+        ]
+        if not cleaned_names:
+            return {}
+
+        session = self._get_thread_session()
+        try:
+            return session.loop.run_until_complete(
+                self._resolve_if_indices_async(
+                    session,
+                    host,
+                    cleaned_names,
+                )
+            )
+        except (SnmpTimeoutError, SnmpReadError):
+            raise
+        except (TimeoutError, asyncio.TimeoutError) as error:
+            raise SnmpTimeoutError(
+                f"SNMP timeout from {host}"
+            ) from error
+        except Exception as error:
+            raise SnmpReadError(
+                f"Cannot resolve interfaces on {host}: {error}"
+            ) from error
+
+    def read_interfaces(
+        self,
+        host,
+        if_indices,
+    ):
+        """Đọc gộp nhiều ifIndex trên cùng 1 thiết bị trong 1 bản tin SNMPv3 GET duy nhất,
+        cô lập lỗi NoSuchInstance riêng cho từng cổng."""
+        host = self._require_text("host", host)
+        unique_indices = []
+        seen = set()
+        for idx in if_indices:
+            if (
+                not isinstance(idx, int)
+                or isinstance(idx, bool)
+                or idx <= 0
+            ):
+                raise SnmpReadError(
+                    "if_index must be a positive integer"
+                )
+            if idx not in seen:
+                seen.add(idx)
+                unique_indices.append(idx)
+
+        if not unique_indices:
+            return {}
+
+        session = self._get_thread_session()
+        try:
+            return session.loop.run_until_complete(
+                self._read_interfaces_async(
+                    session,
+                    host,
+                    unique_indices,
+                )
+            )
+        except (SnmpTimeoutError, SnmpReadError):
+            raise
+        except (TimeoutError, asyncio.TimeoutError) as error:
+            raise SnmpTimeoutError(
+                f"SNMP timeout from {host}"
+            ) from error
+        except Exception as error:
+            raise SnmpReadError(
+                f"Cannot read interfaces {unique_indices} on {host}: {error}"
+            ) from error
+
     def _get_thread_session(self):
         with self._sessions_lock:
             if self._closed:
@@ -288,9 +368,31 @@ class PySnmpV3Client:
         host,
         interface_name,
     ):
-        target_name = self._normalize_interface(
-            interface_name
+        found = await self._resolve_if_indices_async(
+            session,
+            host,
+            [interface_name],
         )
+        if interface_name in found:
+            return found[interface_name]
+        raise SnmpReadError(
+            f"Interface {interface_name} "
+            f"not found on {host}"
+        )
+
+    async def _resolve_if_indices_async(
+        self,
+        session,
+        host,
+        interface_names,
+    ):
+        wanted_by_norm = {}
+        for raw_name in interface_names:
+            norm = self._normalize_interface(raw_name)
+            wanted_by_norm.setdefault(norm, []).append(raw_name)
+
+        resolved = {}
+        remaining_norms = set(wanted_by_norm.keys())
 
         target = await self._create_target(host)
 
@@ -329,20 +431,13 @@ class PySnmpV3Client:
                     value,
                 )
 
-                current_name = (
+                current_norm = self._normalize_interface(
                     value.prettyPrint()
                 )
-
-                if (
-                    self._normalize_interface(
-                        current_name
-                    )
-                    != target_name
-                ):
+                if current_norm not in remaining_norms:
                     continue
 
                 oid_parts = tuple(oid)
-
                 if not oid_parts:
                     raise SnmpReadError(
                         f"Invalid ifName OID "
@@ -350,19 +445,20 @@ class PySnmpV3Client:
                     )
 
                 if_index = int(oid_parts[-1])
-
                 if if_index <= 0:
                     raise SnmpReadError(
                         f"Invalid ifIndex "
                         f"{if_index} from {host}"
                     )
 
-                return if_index
+                for orig_name in wanted_by_norm[current_norm]:
+                    resolved[orig_name] = if_index
+                remaining_norms.discard(current_norm)
 
-        raise SnmpReadError(
-            f"Interface {interface_name} "
-            f"not found on {host}"
-        )
+            if not remaining_norms:
+                break
+
+        return resolved
 
     async def _read_interface_async(
         self,
@@ -370,26 +466,38 @@ class PySnmpV3Client:
         host,
         if_index,
     ):
+        batch = await self._read_interfaces_async(
+            session,
+            host,
+            [if_index],
+        )
+        entry = batch.get(if_index)
+        if isinstance(entry, Exception):
+            raise entry
+        if entry is None:
+            raise SnmpReadError(
+                f"Missing SNMP result for interface {if_index} on {host}"
+            )
+        return entry
+
+    async def _read_interfaces_async(
+        self,
+        session,
+        host,
+        if_indices,
+    ):
         target = await self._create_target(host)
 
-        object_types = (
-            self._indexed_object(
-                self.IF_ADMIN_STATUS_OID,
-                if_index,
-            ),
-            self._indexed_object(
-                self.IF_OPER_STATUS_OID,
-                if_index,
-            ),
-            self._indexed_object(
-                self.IF_HC_IN_OCTETS_OID,
-                if_index,
-            ),
-            self._indexed_object(
-                self.IF_HC_OUT_OCTETS_OID,
-                if_index,
-            ),
-        )
+        object_types = []
+        for idx in if_indices:
+            object_types.extend(
+                (
+                    self._indexed_object(self.IF_ADMIN_STATUS_OID, idx),
+                    self._indexed_object(self.IF_OPER_STATUS_OID, idx),
+                    self._indexed_object(self.IF_HC_IN_OCTETS_OID, idx),
+                    self._indexed_object(self.IF_HC_OUT_OCTETS_OID, idx),
+                )
+            )
 
         (
             error_indication,
@@ -405,6 +513,39 @@ class PySnmpV3Client:
             lookupMib=False,
         )
 
+        # Nếu lỗi mức PDU xảy ra riêng tại 1 cổng trong gói gộp, tách cổng lỗi ra để không vạ lây các cổng lành
+        if (
+            not error_indication
+            and error_status
+            and error_index
+            and len(if_indices) > 1
+        ):
+            pos = int(error_index) - 1
+            bad_slot = pos // 4
+            if 0 <= bad_slot < len(if_indices):
+                bad_idx = if_indices[bad_slot]
+                failed_oid = (
+                    str(var_binds[pos][0])
+                    if 0 <= pos < len(var_binds)
+                    else "unknown"
+                )
+                status_text = getattr(
+                    error_status,
+                    "prettyPrint",
+                    lambda: str(error_status),
+                )()
+                isolated_err = SnmpReadError(
+                    f"SNMP response error from {host}: {status_text} at {failed_oid}"
+                )
+                remaining = [i for i in if_indices if i != bad_idx]
+                partial = (
+                    await self._read_interfaces_async(session, host, remaining)
+                    if remaining
+                    else {}
+                )
+                partial[bad_idx] = isolated_err
+                return partial
+
         self._raise_for_response(
             host,
             error_indication,
@@ -413,37 +554,37 @@ class PySnmpV3Client:
             var_binds,
         )
 
-        if len(var_binds) != 4:
+        expected_count = 4 * len(if_indices)
+        if len(var_binds) != expected_count:
             raise SnmpReadError(
-                f"Expected 4 SNMP values from "
+                f"Expected {expected_count} SNMP values from "
                 f"{host}, received "
                 f"{len(var_binds)}"
             )
 
-        values = []
-
-        for oid, value in var_binds:
-            self._raise_for_value(
-                host,
-                oid,
-                value,
-            )
-
+        results = {}
+        for slot, idx in enumerate(if_indices):
+            chunk = var_binds[slot * 4 : (slot + 1) * 4]
             try:
-                values.append(int(value))
+                values = []
+                for oid, value in chunk:
+                    self._raise_for_value(host, oid, value)
+                    try:
+                        values.append(int(value))
+                    except (TypeError, ValueError) as error:
+                        raise SnmpReadError(
+                            f"Non-integer SNMP value for {oid} from {host}"
+                        ) from error
+                results[idx] = InterfaceCounters(
+                    admin_status=values[0],
+                    oper_status=values[1],
+                    in_octets=values[2],
+                    out_octets=values[3],
+                )
+            except SnmpReadError as item_error:
+                results[idx] = item_error
 
-            except (TypeError, ValueError) as error:
-                raise SnmpReadError(
-                    f"Non-integer SNMP value "
-                    f"for {oid} from {host}"
-                ) from error
-
-        return InterfaceCounters(
-            admin_status=values[0],
-            oper_status=values[1],
-            in_octets=values[2],
-            out_octets=values[3],
-        )
+        return results
 
     @staticmethod
     def _indexed_object(base_oid, if_index):

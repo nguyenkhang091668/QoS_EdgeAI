@@ -115,9 +115,40 @@ class CiscoBandwidthWorker(QThread):
         self.requestInterruption()
 
     def _poll_cycle(self, executor):
-        source_ids = (
-            self.collector.source_ids
-        )
+        source_ids = self.collector.source_ids
+        host_groups = getattr(self.collector, "host_groups", None)
+        poll_host_group = getattr(self.collector, "poll_host_group", None)
+
+        if host_groups and callable(poll_host_group):
+            host_futures = {
+                host: executor.submit(poll_host_group, host)
+                for host in host_groups
+            }
+            samples_by_id = {}
+            for host, group_ids in host_groups.items():
+                future = host_futures[host]
+                try:
+                    group_samples = future.result()
+                    for sample in group_samples:
+                        samples_by_id[sample.source_id] = sample
+                except Exception as error:
+                    sampled_at = time.time()
+                    for source_id in group_ids:
+                        config = self.collector.devices[source_id]
+                        samples_by_id[source_id] = BandwidthSample.unavailable(
+                            source_id=source_id,
+                            source_type="snmp",
+                            status=CollectorStatus.COLLECTOR_ERROR,
+                            sampled_at=sampled_at,
+                            details={
+                                "host": config["host"],
+                                "interface": config["interface"],
+                                "direction": config["direction"],
+                                "label": config.get("label", ""),
+                            },
+                            error=str(error),
+                        )
+            return [samples_by_id[sid] for sid in source_ids]
 
         futures = {
             source_id: executor.submit(

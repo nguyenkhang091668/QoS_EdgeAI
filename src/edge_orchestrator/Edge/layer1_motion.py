@@ -34,6 +34,11 @@ class Camera:
                             "size": (640, 480),
                             "format": "RGB888",
                         },
+                        buffer_count=4,
+                        controls={
+                            # Khóa chu kỳ phơi sáng 20–24 FPS (41.6–50ms): đủ sáng kho & không tụt về 7–8 FPS
+                            "FrameDurationLimits": (41666, 50000),
+                        },
                         transform=Transform(
                             hflip=True,
                             vflip=True,

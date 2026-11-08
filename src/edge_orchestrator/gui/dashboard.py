@@ -40,6 +40,7 @@ from edge_orchestrator.network.local_camera_bandwidth import (
 )
 from edge_orchestrator.gui.ai_camera_worker import (
     AICameraWorker,
+    PreparedPreviewFrame,
     SharedYOLOInferenceWorker,
 )
 from edge_orchestrator.network.bandwidth_store import (
@@ -975,9 +976,26 @@ class MainDashboard(QWidget):
             )
             return
 
+        if hasattr(self, "_sync_camera_recheck_intervals"):
+            self._sync_camera_recheck_intervals(state)
         self._recalculate_target_policy()
         if previous_state == "NORMAL" and state == "ALERT":
             self._queue_telegram_alert()
+
+    def _sync_camera_recheck_intervals(self, state: str = None):
+        """Giữ nhịp 0.4s ở NORMAL để chốt Fast-Attack tức thì; giãn sang 1.0s khi đã giữ ALERT để giảm 60% tải YOLO."""
+        effective_state = state or getattr(self, "_ai_state", "NORMAL")
+        if effective_state == "ALERT":
+            interval = float(
+                getattr(config, "AI_ALERT_HOLD_RECHECK_SEC", 1.0)
+            )
+        else:
+            interval = float(
+                getattr(config, "AI_ACTIVE_RECHECK_SEC", 0.4)
+            )
+        for worker in (getattr(self, "ai_camera_workers", None) or {}).values():
+            if hasattr(worker, "set_active_recheck_sec"):
+                worker.set_active_recheck_sec(interval)
 
     def _queue_telegram_alert(self):
         if self.simulate_ai or not self.telegram_alerts.enabled:
@@ -1667,27 +1685,35 @@ class MainDashboard(QWidget):
             if source_id == "CAM04"
             else getattr(self, "lbl_cam03", self.lbl_camera)
         )
-        src_h, src_w = frame.shape[:2]
         lbl_w = max(1, target_label.width())
         lbl_h = max(1, target_label.height())
 
-        # Co giãn bằng OpenCV trước khi đổi hệ màu & tạo QPixmap để giảm 4x số điểm ảnh xử lý trên Main Thread
-        scale = min(lbl_w / float(src_w), lbl_h / float(src_h))
-        if 0.05 < scale < 0.98:
-            dst_w = max(1, int(src_w * scale))
-            dst_h = max(1, int(src_h * scale))
-            resized = cv2.resize(
-                frame,
-                (dst_w, dst_h),
-                interpolation=cv2.INTER_NEAREST,
-            )
-        else:
-            resized = frame
+        workers_map = getattr(self, "ai_camera_workers", None)
+        if workers_map and lbl_w >= 64 and lbl_h >= 64:
+            worker = workers_map.get(source_id)
+            if worker is not None and hasattr(worker, "set_target_label_size"):
+                worker.set_target_label_size(lbl_w, lbl_h)
 
-        rgb = cv2.cvtColor(
-            resized,
-            cv2.COLOR_BGR2RGB,
-        )
+        if isinstance(frame, PreparedPreviewFrame) or hasattr(frame, "rgb"):
+            rgb = frame.rgb
+        else:
+            src_h, src_w = frame.shape[:2]
+            scale = min(lbl_w / float(src_w), lbl_h / float(src_h))
+            if 0.05 < scale < 0.98:
+                dst_w = max(1, int(src_w * scale))
+                dst_h = max(1, int(src_h * scale))
+                resized = cv2.resize(
+                    frame,
+                    (dst_w, dst_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            else:
+                resized = frame
+            rgb = cv2.cvtColor(
+                resized,
+                cv2.COLOR_BGR2RGB,
+            )
+
         height, width, channels = rgb.shape
         bytes_per_line = channels * width
 
@@ -1941,10 +1967,15 @@ class MainDashboard(QWidget):
                 confidence=getattr(config, "AI_CONFIDENCE", 0.5),
                 v4l2=cam_cfg.get("v4l2", False),
                 shared_yolo_worker=self.shared_yolo_worker,
-                max_box_age_sec=getattr(config, "AI_MAX_BOX_AGE_SEC", 2.0),
+                max_box_age_sec=getattr(config, "AI_MAX_BOX_AGE_SEC", 2.4),
                 active_recheck_sec=getattr(
-                    config, "AI_ACTIVE_RECHECK_SEC", 0.8),
-                idle_recheck_sec=getattr(config, "AI_IDLE_RECHECK_SEC", 1.5),
+                    config, "AI_ACTIVE_RECHECK_SEC", 0.4),
+                idle_recheck_sec=getattr(config, "AI_IDLE_RECHECK_SEC", 2.5),
+                max_gui_fps=getattr(config, "GUI_PREVIEW_MAX_FPS", 20.0),
+                preview_max_size=(
+                    getattr(config, "GUI_PREVIEW_MAX_WIDTH", 480),
+                    getattr(config, "GUI_PREVIEW_MAX_HEIGHT", 360),
+                ),
             )
             worker.frame_packet_signal.connect(
                 self._on_real_camera_frame_packet)
@@ -1961,6 +1992,8 @@ class MainDashboard(QWidget):
             self.ai_camera_workers[cam_id] = worker
             if cam_id == "CAM03":
                 self.ai_camera_worker = worker
+        if hasattr(self, "_sync_camera_recheck_intervals"):
+            self._sync_camera_recheck_intervals()
 
     def _on_ai_camera_error(self, message: str, source_id: str = "CAM03"):
         active_cams = getattr(self, "_active_ai_cameras", set())

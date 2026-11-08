@@ -249,6 +249,29 @@ class SharedYOLOInferenceWorker(QThread):
         return True
 
 
+@dataclass(frozen=True)
+class PreparedPreviewFrame:
+    """Khung hình RGB đã co giãn sẵn trên luồng phụ C++ (nhả GIL) để Main Thread dựng QPixmap tức thì."""
+    rgb: np.ndarray
+
+
+def prepare_preview_rgb(frame: np.ndarray, max_width: int, max_height: int) -> PreparedPreviewFrame:
+    src_h, src_w = frame.shape[:2]
+    mw = max(1, int(max_width))
+    mh = max(1, int(max_height))
+    scale = min(mw / float(src_w), mh / float(src_h))
+    if 0.05 < scale < 0.98:
+        dst_w = max(1, int(src_w * scale))
+        dst_h = max(1, int(src_h * scale))
+        resized = cv2.resize(frame, (dst_w, dst_h), interpolation=cv2.INTER_NEAREST)
+    else:
+        resized = frame
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    if not rgb.flags["C_CONTIGUOUS"]:
+        rgb = np.ascontiguousarray(rgb)
+    return PreparedPreviewFrame(rgb=rgb)
+
+
 class AICameraWorker(QThread):
     frame_signal = pyqtSignal(object)
     frame_packet_signal = pyqtSignal(str, int, float, object)  # (source_id, frame_id, captured_at, frame)
@@ -272,9 +295,11 @@ class AICameraWorker(QThread):
         bandwidth_interval_sec=2.0,
         jpeg_quality=80,
         shared_yolo_worker: Optional[SharedYOLOInferenceWorker] = None,
-        max_box_age_sec=2.0,
-        active_recheck_sec=0.8,
-        idle_recheck_sec=1.5,
+        max_box_age_sec=2.4,
+        active_recheck_sec=0.4,
+        idle_recheck_sec=2.5,
+        max_gui_fps=20.0,
+        preview_max_size=(480, 360),
         parent=None,
     ):
         super().__init__(parent)
@@ -291,21 +316,44 @@ class AICameraWorker(QThread):
         self.max_box_age_sec = float(max_box_age_sec)
         self.active_recheck_sec = float(active_recheck_sec)
         self.idle_recheck_sec = float(idle_recheck_sec)
+        self.max_gui_fps = float(max_gui_fps)
+        self._preview_max_w = max(64, int(preview_max_size[0]))
+        self._preview_max_h = max(64, int(preview_max_size[1]))
         self._running = False
         self._camera_ref: Optional[EdgeAICamera] = None
 
         # Bộ đếm nghiệm thu trên Pi 4
         self.preview_fps = 0.0
+        self.gui_emit_fps = 0.0
         self.max_frame_gap_ms = 0.0
         self.triggers_count = 0
         self.periodic_count = 0
         self.latest_emitted_frame_id = 0
         self.dropped_gui_frames = 0
 
+    def set_target_label_size(self, width: int, height: int):
+        """Cập nhật kích thước QLabel đích để luồng phụ tự co giãn vừa khít khung hiển thị."""
+        w = int(width)
+        h = int(height)
+        if w >= 64 and h >= 64:
+            self._preview_max_w = w
+            self._preview_max_h = h
+
+    def set_active_recheck_sec(self, interval_sec: float):
+        """Điều chỉnh động chu kỳ quét lại YOLO khi đang có người mà không dừng luồng capture."""
+        val = float(interval_sec)
+        if val <= 0:
+            return
+        self.active_recheck_sec = val
+        cam = self._camera_ref
+        if cam is not None and hasattr(cam, "set_active_recheck_sec"):
+            cam.set_active_recheck_sec(val)
+
     def get_diagnostics(self) -> dict:
         return {
             "source_id": self.source_id,
             "preview_fps": round(self.preview_fps, 2),
+            "gui_emit_fps": round(self.gui_emit_fps, 2),
             "max_frame_gap_ms": round(self.max_frame_gap_ms, 2),
             "triggers_count": self.triggers_count,
             "periodic_count": self.periodic_count,
@@ -344,12 +392,19 @@ class AICameraWorker(QThread):
 
             fps_window_start = time.monotonic()
             fps_window_frames = 0
+            gui_window_frames = 0
             last_frame_mono = None
+            last_gui_emit_mono = None
             last_jpeg_size = 0
+            gui_min_interval = (
+                (1.0 / self.max_gui_fps) if self.max_gui_fps > 0 else 0.0
+            )
 
             while self._running:
+                # Đọc & chạy Tầng 1–4 đủ 100% số frame phần cứng (KHÔNG sleep / KHÔNG bỏ frame)
                 packet = camera.read()
                 now_mono = time.monotonic()
+                meta = packet.metadata
 
                 if last_frame_mono is not None:
                     gap_ms = (now_mono - last_frame_mono) * 1000.0
@@ -359,10 +414,6 @@ class AICameraWorker(QThread):
 
                 fps_window_frames += 1
                 elapsed_fps = now_mono - fps_window_start
-                if elapsed_fps >= 1.0:
-                    self.preview_fps = fps_window_frames / elapsed_fps
-                    fps_window_frames = 0
-                    fps_window_start = now_mono
 
                 if last_jpeg_size == 0 or packet.frame_id % 15 == 1:
                     last_jpeg_size = len(packet.jpeg(quality=self.jpeg_quality))
@@ -375,18 +426,39 @@ class AICameraWorker(QThread):
                         sampled_at,
                     )
 
-                # Gửi frame kèm định danh (source_id, frame_id, captured_at) cho GUI ngay lập tức.
-                self.latest_emitted_frame_id = packet.frame_id
-                self.frame_packet_signal.emit(
-                    self.source_id,
-                    packet.frame_id,
-                    packet.captured_at,
-                    packet.frame,
+                # Nhánh GUI tách độc lập: co giãn & đổi BGR->RGB trên luồng phụ ở nhịp tối đa ~20 FPS
+                should_emit_gui = (
+                    last_gui_emit_mono is None
+                    or gui_min_interval <= 0.0
+                    or (now_mono - last_gui_emit_mono) >= gui_min_interval
+                    or bool(meta.get("triggered", False))
                 )
-                self.frame_signal.emit(packet.frame)
+                if should_emit_gui:
+                    last_gui_emit_mono = now_mono
+                    gui_window_frames += 1
+                    prepared = prepare_preview_rgb(
+                        packet.frame,
+                        self._preview_max_w,
+                        self._preview_max_h,
+                    )
+                    self.latest_emitted_frame_id = packet.frame_id
+                    self.frame_packet_signal.emit(
+                        self.source_id,
+                        packet.frame_id,
+                        packet.captured_at,
+                        prepared,
+                    )
+                    if self.receivers(self.frame_signal) > 0:
+                        self.frame_signal.emit(packet.frame)
+
+                if elapsed_fps >= 1.0:
+                    self.preview_fps = fps_window_frames / elapsed_fps
+                    self.gui_emit_fps = gui_window_frames / elapsed_fps
+                    fps_window_frames = 0
+                    gui_window_frames = 0
+                    fps_window_start = now_mono
 
                 if use_async_yolo:
-                    meta = packet.metadata
                     if meta.get("should_infer", False):
                         reason = meta.get("infer_reason") or "motion_trigger"
                         if reason == "motion_trigger":

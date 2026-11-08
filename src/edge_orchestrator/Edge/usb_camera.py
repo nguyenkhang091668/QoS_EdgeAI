@@ -2,7 +2,7 @@
 import cv2
 
 
-def open_capture(device=0, *, v4l2=False, capture_factory=None):
+def open_capture(device=0, *, v4l2=False, capture_factory=None, fps=30, buffer_size=None):
     factory = capture_factory or cv2.VideoCapture
     cap = factory(device, cv2.CAP_V4L2) if v4l2 else factory(device)
     try:
@@ -13,7 +13,9 @@ def open_capture(device=0, *, v4l2=False, capture_factory=None):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         if v4l2:
-            cap.set(cv2.CAP_PROP_FPS, 30)
+            cap.set(cv2.CAP_PROP_FPS, int(fps))
+            if buffer_size is not None:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, int(buffer_size))
         return cap
     except Exception:
         cap.release()

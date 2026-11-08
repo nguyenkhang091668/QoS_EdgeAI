@@ -111,6 +111,16 @@ class EdgeAICamera:
             self._last_ai_frame_id = frame_id
         return accepted
 
+    def set_active_recheck_sec(self, interval_sec: float):
+        """Điều chỉnh động chu kỳ quét lại khi đang có người cho camera này."""
+        val = float(interval_sec)
+        if val <= 0:
+            raise ValueError("active_recheck_sec must be > 0")
+        self.active_recheck_sec = val
+        pipeline = self._pipeline
+        if pipeline is not None:
+            pipeline.set_active_recheck_sec(val)
+
     def clear_ai_state(self):
         """Xóa ngay bounding box của camera này khi lỗi hoặc dừng."""
         pipeline = self._pipeline
@@ -130,6 +140,14 @@ class EdgeAICamera:
                 else:
                     from layer1_motion import Camera
                 cap = Camera("picamera2", self.camera_index)
+            elif self.v4l2 and self._capture_factory is cv2.VideoCapture:
+                cap = open_capture(
+                    self.camera_index,
+                    v4l2=True,
+                    capture_factory=self._capture_factory,
+                    fps=24,
+                    buffer_size=1,
+                )
             else:
                 cap = open_capture(self.camera_index, v4l2=self.v4l2,
                                capture_factory=self._capture_factory)
@@ -232,7 +250,7 @@ class EdgeAICamera:
             self._frame_id,
             captured_at,
             processed,
-            result['roi'].copy(),
+            result['roi'],
             result['clean'],
             result['roi_mask'],
             metadata,

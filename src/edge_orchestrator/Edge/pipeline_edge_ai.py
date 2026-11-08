@@ -69,6 +69,14 @@ class Pipeline:
             self.last_ai_captured_at = captured_at
             return True
 
+    def set_active_recheck_sec(self, interval_sec: float):
+        """Điều chỉnh động chu kỳ quét lại khi đang có người (nhanh lúc xác nhận, giãn nhẹ khi giữ ALERT)."""
+        val = float(interval_sec)
+        if val <= 0:
+            raise ValueError("active_recheck_sec must be > 0")
+        with self._ai_lock:
+            self.active_recheck_sec = val
+
     def clear_ai_state(self):
         """Xóa ngay bounding box và trạng thái AI khi lỗi hoặc dừng camera."""
         with self._ai_lock:
@@ -81,15 +89,23 @@ class Pipeline:
         frame = normalize_frame(frame)
         now = self.clock()
 
-        # Xử lý motion trên ảnh chưa vẽ bounding box.
-        result = process_layer3(self.previous, frame)
-        self.previous = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        contours, _ = cv2.findContours(
-            result["roi_mask"], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        # Xử lý motion trên ảnh chưa vẽ bounding box (tái sử dụng gray từ Tầng 3, ngắt mạch khi tĩnh).
+        result, gray = process_layer3(
+            self.previous,
+            frame,
+            fast_idle=True,
+            return_gray=True,
         )
-        result["roi_motion"] = (
-            result["valid"] and any(cv2.contourArea(contour) >= 40 for contour in contours)
-        )
+        self.previous = gray
+        if result["valid"] and result["roi_pixels"] > 0:
+            contours, _ = cv2.findContours(
+                result["roi_mask"], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            result["roi_motion"] = any(
+                cv2.contourArea(contour) >= 40 for contour in contours
+            )
+        else:
+            result["roi_motion"] = False
         result["triggered"] = self.machine.update(result["roi_motion"])
         result["inferred"] = False
 
@@ -106,6 +122,7 @@ class Pipeline:
             last_ai = copy.deepcopy(self.last_ai) if self.last_ai is not None else None
             last_ai_time = self.last_ai_time
             last_ai_frame_id = self.last_ai_frame_id
+            active_recheck_sec = self.active_recheck_sec
 
         has_person = bool(
             last_ai
@@ -115,7 +132,7 @@ class Pipeline:
             )
         )
         recheck_interval = (
-            self.active_recheck_sec if has_person else self.idle_recheck_sec
+            active_recheck_sec if has_person else self.idle_recheck_sec
         )
         periodic_due = (
             recheck_interval is not None

@@ -31,16 +31,23 @@ def crop_roi(image):
     return image[Y1:Y2, X1:X2].copy()
 
 
-def process_layer3(previous_gray, frame):
+def process_layer3(previous_gray, frame, *, fast_idle=False, return_gray=False):
     if frame.shape[:2] != (480, 640):
         raise ValueError('Normalize camera frame before processing')
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    result = process_frame(previous_gray, gray)
+    result = process_frame(previous_gray, gray, fast_idle=fast_idle)
     # Diagnostic crops remain visible even when Layer 2 rejects the frame.
     result['roi'] = crop_roi(frame)
-    result['roi_mask'] = crop_roi(result['clean'])
-    result['roi_pixels'] = cv2.countNonZero(result['roi_mask'])
-    result['roi_ready'] = result['valid']
+    if fast_idle and not result['valid']:
+        result['roi_mask'] = np.zeros((Y2 - Y1, X2 - X1), dtype=np.uint8)
+        result['roi_pixels'] = 0
+        result['roi_ready'] = False
+    else:
+        result['roi_mask'] = crop_roi(result['clean'])
+        result['roi_pixels'] = cv2.countNonZero(result['roi_mask'])
+        result['roi_ready'] = result['valid']
+    if return_gray:
+        return result, gray
     return result
 
 

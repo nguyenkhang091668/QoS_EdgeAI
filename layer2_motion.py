@@ -10,7 +10,10 @@ KERNEL = np.ones((3, 3), dtype=np.uint8)
 
 def kiem_tra_anh_mo(gray, threshold=100.0):
     """Return (is_blurry, Laplacian variance) measured on original grayscale."""
-    score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    lap = cv2.Laplacian(gray, cv2.CV_16S)
+    _, stddev = cv2.meanStdDev(lap)
+    std_val = float(stddev[0, 0])
+    score = std_val * std_val
     return score < threshold, score
 
 
@@ -26,14 +29,22 @@ def filter_mask(mask, min_area=40.0):
     return clean, retained
 
 
-def process_frame(previous_gray, gray):
+def process_frame(previous_gray, gray, *, fast_idle=False):
     initialized = previous_gray is not None and previous_gray.shape == gray.shape
     if initialized:
         raw, pixels, motion1 = detect_motion(previous_gray, gray)
     else:
         raw, pixels, motion1 = np.zeros_like(gray), 0, False
-    # Always calculate diagnostic masks, even when Layer 1 does not trigger.
+    if fast_idle and not motion1:
+        empty = raw if not initialized else np.zeros_like(gray)
+        return dict(raw=raw, clean=empty, pixels=pixels, motion1=False,
+                    clean_pixels=0, contours=0, blurry=False, sharpness=0.0,
+                    valid=False, initialized=initialized)
     clean, contours = filter_mask(raw)
+    if fast_idle and not contours:
+        return dict(raw=raw, clean=clean, pixels=pixels, motion1=motion1,
+                    clean_pixels=0, contours=0, blurry=False, sharpness=0.0,
+                    valid=False, initialized=initialized)
     blurry, sharpness = kiem_tra_anh_mo(gray)
     valid = motion1 and bool(contours) and not blurry
     return dict(raw=raw, clean=clean, pixels=pixels, motion1=motion1,
