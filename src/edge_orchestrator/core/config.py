@@ -7,6 +7,8 @@ Hướng dẫn: Điền IP thực tế Tailscale của bạn trước khi chạy
 
 import os
 
+from edge_orchestrator.core.qos_profile import load_qos_profile
+
 # ==============================================================================
 # [BƯỚC 1] ĐIỀN IP TAILSCALE THỰC TẾ CỦA BẠN VÀO ĐÂY
 # Lệnh kiểm tra: tailscale status
@@ -101,9 +103,9 @@ SNMP_DEVICES = {
     # ==========================================================
     "ASW_CAM": {
         "host": ASW_VLAN99_IP,
-        "interface": "GigabitEthernet0/2",
+        "interface": "GigabitEthernet1/0",
         "direction": "rx",
-        "label": "ASW Camera Gi0/2 RX",
+        "label": "ASW CAM03 Gi1/0 RX",
     },
     "ASW_DSW1": {
         "host": ASW_VLAN99_IP,
@@ -268,6 +270,15 @@ LOCAL_CAMERAS = {
         "label": "CAM04 Pi Camera",
     }
 }
+# Opt-in RTP from the same capture owner as AI. Encoder never opens /dev/video0.
+# Values are validated in the camera worker so encoder configuration errors do not kill AI.
+CAM03_RTP_ENABLED = os.environ.get("CAM03_RTP_ENABLED", "0") == "1"
+CAM03_RTP_CONFIG = {
+    "destination": os.environ.get("CAM03_RTP_DESTINATION", "100.108.25.63"),
+    "local_address": os.environ.get("CAM03_RTP_LOCAL_ADDRESS", "192.168.10.13"),
+    "interface": "eth0",
+    "sdp_path": os.environ.get("CAM03_RTP_SDP_PATH", "/tmp/datn-cam03-app.sdp"),
+}
 AI_CONFIDENCE = 0.5
 AI_THREADS = int(os.environ.get("AI_THREADS", "2"))
 AI_OBSERVATION_TTL_SEC = float(os.environ.get("AI_OBSERVATION_TTL_SEC", "4.5"))
@@ -315,15 +326,14 @@ AI_WATCHDOG_INTERVAL_MS = int(os.environ.get("AI_WATCHDOG_INTERVAL_MS", "500"))
 # ==============================================================================
 # [BƯỚC 8] BANDWIDTH QoS - LÝ THUYẾT & HỌC THUẬT
 # ==============================================================================
-# Cơ chế chuyển trạng thái Dynamic QoS (1 Mbps <-> 8 Mbps) được điều khiển
-# theo 2 trạng thái băng thông của Decision Engine:
-#
-# 1. Trạng thái NORMAL (Bình thường / IDLE - NO_PERSON):
-QOS_NORMAL_BW_MBPS = 1
-
-# 2. Trạng thái ALERT (Khẩn cấp - PERSON_DETECTED):
-
-QOS_ALERT_BW_MBPS = 8
+# Giá trị kbps dùng chung cho lệnh router, xác minh và phần hiển thị.
+# EDGE_QOS_PROFILE=lab-1m chọn 200/700; mặc định standard vẫn 1000/8000.
+# Chọn profile không tự thay parent shaper trên router.
+QOS_PROFILE = load_qos_profile()
+QOS_NORMAL_BW_KBPS = QOS_PROFILE.normal_kbps
+QOS_ALERT_BW_KBPS = QOS_PROFILE.alert_kbps
+QOS_NORMAL_BW_MBPS = QOS_NORMAL_BW_KBPS / 1000.0
+QOS_ALERT_BW_MBPS = QOS_ALERT_BW_KBPS / 1000.0
 
 # ==============================================================================
 # [BƯỚC 9] DASHBOARD GUI
@@ -357,3 +367,4 @@ CAMERA_LOCATIONS = {
     "CAM03": "Kho tài liệu bảo mật tầng 8",
     "CAM04": os.environ.get("CAM04_LOCATION", "Kho tài liệu mật tầng 9"),
 }
+

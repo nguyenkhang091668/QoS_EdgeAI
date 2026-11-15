@@ -10,7 +10,7 @@ from edge_orchestrator.network.syslog_receiver import start_syslog_server
 
 def main():
     parser = argparse.ArgumentParser(
-        description="DATN Main Orchestrator — MacBook thay thế Raspberry Pi 4"
+        description="DATN Edge Orchestrator — Pi xử lý AI và điều khiển, Mac giám sát đầu ra"
     )
     parser.add_argument("--gns3", action="store_true",
                         help="Kết nối tới GNS3 thật (Syslog UDP + Netmiko SSH thật)")
@@ -29,12 +29,14 @@ def main():
     config.SIMULATE_TELEMETRY = sim_ai
 
     print("\n" + "="*65)
-    print("  DATN TDTU — MacBook Edge Orchestrator (thay thế Raspberry Pi 4)")
+    print("  DATN TDTU — Raspberry Pi Edge AI Orchestrator")
     print(f"  Sinh viên: Nguyễn Tiết Khang | MSSV: 41900966")
     print("="*65)
     print("="*65)
     print(f"  Chế độ AI:        {'Mô phỏng' if sim_ai else 'YOLOv8 Thật'}")
     print(f"  Chế độ Netmiko:   {'Mô phỏng' if sim_netmiko else 'SSH Thật → GNS3'}")
+    if not sim_netmiko:
+        print(f"  Đường SSH:        {os.environ.get('EDGE_SSH_TRANSPORT', 'jump')}")
     print(f"  Chế độ Syslog:    {'Mô phỏng' if sim_syslog else 'UDP Thật từ GNS3'}")
     print(f"  Chế độ Telemetry: {'Mô phỏng' if sim_ai else 'Tshark Thật (yêu cầu sudo)'}")
     print("="*65 + "\n")
@@ -87,3 +89,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

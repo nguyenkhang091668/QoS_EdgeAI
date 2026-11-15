@@ -33,6 +33,7 @@ class CameraPacket:
     metadata: dict
     event: Optional[dict]          # Fresh ai_result event, including negative results
     source_id: str = "CAM03"
+    raw_frame: Optional[np.ndarray] = None  # Opt-in BGR snapshot before ROI/box overlays
 
     def jpeg(self, quality=80):
         """Encode stream image without opening any camera/server."""
@@ -56,7 +57,7 @@ class EdgeAICamera:
                  threads=4, cooldown=2., *, detector=None, capture_factory=None,
                  clock=time.monotonic, v4l2=False, source="usb",
                  source_id="CAM03", async_ai=False, max_box_age_sec=2.0,
-                 active_recheck_sec=0.8, idle_recheck_sec=1.5):
+                 active_recheck_sec=0.8, idle_recheck_sec=1.5, retain_raw_frame=False):
         self.model_path = Path(model_path) if model_path else Path(__file__).with_name('yolov8n.pt')
         self.camera_index = camera_index
         self.v4l2 = v4l2
@@ -69,6 +70,7 @@ class EdgeAICamera:
         self.max_box_age_sec = max_box_age_sec
         self.active_recheck_sec = active_recheck_sec
         self.idle_recheck_sec = idle_recheck_sec
+        self.retain_raw_frame = bool(retain_raw_frame)
         self._capture_factory = capture_factory or cv2.VideoCapture
         self._clock = clock
         self._lock = threading.RLock()
@@ -214,6 +216,7 @@ class EdgeAICamera:
             raise ValueError('Expected uint8 BGR frame')
         if frame.ndim != 3 or frame.shape[2] != 3 or min(frame.shape[:2]) == 0:
             raise ValueError('Expected non-empty HxWx3 BGR frame')
+        raw_frame = frame.copy() if self.retain_raw_frame else None
         self._initialize()
         try:
             processed, result = self._pipeline.step(frame)
@@ -256,6 +259,7 @@ class EdgeAICamera:
             metadata,
             event,
             source_id=self.source_id,
+            raw_frame=raw_frame,
         )
     release = close
 
@@ -264,3 +268,4 @@ class EdgeAICamera:
 
     def __exit__(self, exc_type, exc, traceback):
         self.close()
+

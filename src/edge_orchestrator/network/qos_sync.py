@@ -5,6 +5,8 @@ import logging
 import threading
 import time
 
+from edge_orchestrator.core import config
+
 
 @dataclass(frozen=True)
 class PolicySyncResult:
@@ -134,7 +136,7 @@ class RouterQoSSynchronizer:
                 state.next_attempt_at = now + self.verify_sec
                 if changed or previous_policy != policy or previous_error is not None:
                     action = "Đã áp dụng và xác minh" if changed else "Đã xác minh"
-                    bandwidth = 8000 if policy == "ALERT" else 1000
+                    bandwidth = config.QOS_PROFILE.bandwidth_kbps(policy)
                     event = QoSSyncEvent(
                         name, policy, True,
                         f"{action} {policy}, CAMERA_CLASS={bandwidth} kbps.",
@@ -163,3 +165,4 @@ class RouterQoSSynchronizer:
         for worker in workers:
             if worker.ident is not None and worker is not threading.current_thread():
                 worker.join(max(0.0, deadline - time.monotonic()))
+

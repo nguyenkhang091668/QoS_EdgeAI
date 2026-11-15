@@ -58,3 +58,6 @@ id_ed25519*
 
 *.pt
 !src/edge_orchestrator/Edge/yolov8n.pt
+
+# Local deployment backups
+/.backups/

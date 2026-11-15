@@ -273,10 +273,10 @@ class MainDashboard(QWidget):
             line, = self.ax.plot([], [], color=style["color"], linestyle=style["linestyle"], linewidth=1.4,
                                  label=(f"{source_id} [{CollectorStatus.WARMING_UP.value}]"),)
             self.bandwidth_lines[source_id] = line
-        self.ax.axhline(y=8.0, color="#ff5252", linestyle=":",
-                        linewidth=1, label="Ngưỡng QoS 8 Mbps")
+        self.ax.axhline(y=config.QOS_ALERT_BW_MBPS, color="#ff5252", linestyle=":",
+                        linewidth=1, label=f"QoS ALERT {config.QOS_ALERT_BW_KBPS} kbps")
         self.ax.set_xlim(-config.BANDWIDTH_HISTORY_SEC, 0)
-        self.ax.set_ylim(0, 10)
+        self.ax.set_ylim(0, config.QOS_PROFILE.expected_parent_bps / 1_000_000)
         self.ax.legend(loc="upper left", fontsize=6, ncol=2,
                        facecolor="#1a1a2e", labelcolor="white", framealpha=0.8,)
         self.canvas = FigureCanvas(self.fig)
@@ -367,8 +367,8 @@ class MainDashboard(QWidget):
 
         # Nút điều khiển thủ công
         btn_row = QHBoxLayout()
-        btn_alert = QPushButton(" Nạp QoS ALERT (8M)")
-        btn_normal = QPushButton(" Nạp QoS NORMAL (1M)")
+        btn_alert = QPushButton(f" Nạp QoS ALERT ({config.QOS_ALERT_BW_KBPS} kbps)")
+        btn_normal = QPushButton(f" Nạp QoS NORMAL ({config.QOS_NORMAL_BW_KBPS} kbps)")
         btn_acl = QPushButton(" Test ACL Remediation")
         for btn in [btn_alert, btn_normal, btn_acl]:
             btn.setFont(QFont("Arial", 8))
@@ -539,6 +539,9 @@ class MainDashboard(QWidget):
                          f"SSH={'Mô phỏng' if self.simulate_netmiko else 'Thật'} | "
                          f"Syslog={'Mô phỏng' if self.simulate_syslog else 'Thật'}")
         if not self.simulate_netmiko:
+            self.log_console(
+                f"[DYNAMIC QOS] Profile {config.QOS_PROFILE.name}: "
+                f"NORMAL={config.QOS_NORMAL_BW_KBPS}, ALERT={config.QOS_ALERT_BW_KBPS} kbps.")
             self.log_console(
                 "[DYNAMIC QOS] Điều phối R1/R2 độc lập; retry và xác minh mỗi 15s.")
             for name, error in self._network_controller_errors.items():
@@ -855,9 +858,10 @@ class MainDashboard(QWidget):
                 framealpha=0.8,
             )
 
-        target_ymax = max(10.0, round(maximum_value * 1.2, 1))
+        profile_mbps = config.QOS_PROFILE.expected_parent_bps / 1_000_000
+        target_ymax = max(profile_mbps, round(maximum_value * 1.2, 1))
         current_ylim = self.ax.get_ylim()
-        ylim_changed = abs(current_ylim[1] - target_ymax) > 0.5
+        ylim_changed = abs(current_ylim[1] - target_ymax) > profile_mbps * 0.05
         if ylim_changed:
             self.ax.set_ylim(0, target_ymax)
 
@@ -1399,7 +1403,7 @@ class MainDashboard(QWidget):
                 cv2.rectangle(img, (150, 50), (300, 180), (0, 0, 255), 2)
                 cv2.putText(img, "PERSON 94%", (153, 46),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 80, 255), 2)
-                cv2.putText(img, "⚠ ALERT — QoS 8 Mbps DSCP AF41",
+                cv2.putText(img, f"ALERT - QoS {config.QOS_ALERT_BW_KBPS} kbps DSCP AF41",
                             (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 100, 255), 1)
                 # Flash border đỏ
                 cv2.rectangle(img, (0, 0), (w-1, h-1), (0, 0, 200), 4)
@@ -1976,9 +1980,13 @@ class MainDashboard(QWidget):
                     getattr(config, "GUI_PREVIEW_MAX_WIDTH", 480),
                     getattr(config, "GUI_PREVIEW_MAX_HEIGHT", 360),
                 ),
+                rtp_config=(dict(config.CAM03_RTP_CONFIG)
+                            if cam_id == "CAM03" and getattr(config, "CAM03_RTP_ENABLED", False)
+                            else None),
             )
             worker.frame_packet_signal.connect(
                 self._on_real_camera_frame_packet)
+            worker.rtp_status_signal.connect(self._on_rtp_status)
             worker.observation_signal.connect(self._on_ai_observation)
             worker.error_signal.connect(
                 lambda msg, cid=cam_id: self._on_ai_camera_error(msg, cid)
@@ -1994,6 +2002,12 @@ class MainDashboard(QWidget):
                 self.ai_camera_worker = worker
         if hasattr(self, "_sync_camera_recheck_intervals"):
             self._sync_camera_recheck_intervals()
+
+    def _on_rtp_status(self, source_id, status, message):
+        if not hasattr(self, "_rtp_status_by_camera"):
+            self._rtp_status_by_camera = {}
+        self._rtp_status_by_camera[source_id] = {"status": status, "message": message}
+        self.log_console(f"[RTP][{source_id}] {status}: {message}", alert=status == "ERROR")
 
     def _on_ai_camera_error(self, message: str, source_id: str = "CAM03"):
         active_cams = getattr(self, "_active_ai_cameras", set())
@@ -2048,3 +2062,4 @@ class MainDashboard(QWidget):
                 self._ai_available = False
                 self._latest_person_detected = False
                 self._latest_ai_observation_at = None
+

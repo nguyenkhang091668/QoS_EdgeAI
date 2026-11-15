@@ -10,6 +10,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from edge_orchestrator.Edge import EdgeAICamera
 from edge_orchestrator.Edge.layer5_ai import Detector
+from edge_orchestrator.network.rtp_streamer import RtpStreamer, RtpStreamConfig
 from edge_orchestrator.network.local_camera_bandwidth import (
     EncodedBandwidthMeter,
 )
@@ -50,6 +51,7 @@ class SharedYOLOInferenceWorker(QThread):
         self.threads = int(threads)
         self._detector = detector
         self._cond = threading.Condition()
+        self.ready_event = threading.Event()
         self._running = False
         self._turn_order = list(camera_order)
         self._turn_index = 0
@@ -135,6 +137,7 @@ class SharedYOLOInferenceWorker(QThread):
 
     def run(self):
         with self._cond:
+            self.ready_event.clear()
             self._running = True
 
         try:
@@ -147,6 +150,10 @@ class SharedYOLOInferenceWorker(QThread):
                 )
                 if hasattr(self._detector, "warmup"):
                     self._detector.warmup()
+            with self._cond:
+                if not self._running:
+                    return
+                self.ready_event.set()
             self.status_signal.emit("RUNNING")
 
             while True:
@@ -231,6 +238,7 @@ class SharedYOLOInferenceWorker(QThread):
             self.status_signal.emit("ERROR")
         finally:
             with self._cond:
+                self.ready_event.clear()
                 self._running = False
                 for k in self._pending_slots:
                     self._pending_slots[k] = None
@@ -240,6 +248,7 @@ class SharedYOLOInferenceWorker(QThread):
     def stop(self, timeout_ms: int = 5000) -> bool:
         """Đánh thức worker đang chờ, đợi suy luận hiện tại kết thúc rồi mới giải phóng model."""
         with self._cond:
+            self.ready_event.clear()
             self._running = False
             for k in self._pending_slots:
                 self._pending_slots[k] = None
@@ -283,6 +292,7 @@ class AICameraWorker(QThread):
     )
     error_signal = pyqtSignal(str)
     status_signal = pyqtSignal(str)
+    rtp_status_signal = pyqtSignal(str, str, str)  # source, status, message
 
     def __init__(
         self,
@@ -301,6 +311,8 @@ class AICameraWorker(QThread):
         max_gui_fps=20.0,
         preview_max_size=(480, 360),
         parent=None,
+        *,
+        rtp_config=None,
     ):
         super().__init__(parent)
 
@@ -321,6 +333,8 @@ class AICameraWorker(QThread):
         self._preview_max_h = max(64, int(preview_max_size[1]))
         self._running = False
         self._camera_ref: Optional[EdgeAICamera] = None
+        self.rtp_config = rtp_config
+        self._rtp = None
 
         # Bộ đếm nghiệm thu trên Pi 4
         self.preview_fps = 0.0
@@ -359,6 +373,7 @@ class AICameraWorker(QThread):
             "periodic_count": self.periodic_count,
             "latest_emitted_frame_id": self.latest_emitted_frame_id,
             "dropped_gui_frames": self.dropped_gui_frames,
+            "rtp": self._rtp.snapshot() if self._rtp is not None else {"status": "DISABLED"},
         }
 
     def run(self):
@@ -379,10 +394,22 @@ class AICameraWorker(QThread):
                 max_box_age_sec=self.max_box_age_sec,
                 active_recheck_sec=self.active_recheck_sec,
                 idle_recheck_sec=self.idle_recheck_sec,
+                retain_raw_frame=self.rtp_config is not None,
             )
             self._camera_ref = camera
 
             camera.open()
+            if self.rtp_config is not None:
+                try:
+                    self._rtp = RtpStreamer(
+                        RtpStreamConfig(**self.rtp_config),
+                        lambda status, message: self.rtp_status_signal.emit(
+                            self.source_id, status, message),
+                        ready_event=(self.shared_yolo_worker.ready_event if use_async_yolo else None),
+                    )
+                    self._rtp.start()
+                except Exception as error:
+                    self.rtp_status_signal.emit(self.source_id, "ERROR", str(error))
             if use_async_yolo:
                 self.shared_yolo_worker.register_camera(
                     self.source_id,
@@ -403,6 +430,12 @@ class AICameraWorker(QThread):
             while self._running:
                 # Đọc & chạy Tầng 1–4 đủ 100% số frame phần cứng (KHÔNG sleep / KHÔNG bỏ frame)
                 packet = camera.read()
+                if self._rtp is not None and packet.raw_frame is not None:
+                    try:
+                        self._rtp.submit_frame(packet.raw_frame, packet.frame_id)
+                    except Exception as error:
+                        self._rtp.request_stop()
+                        self.rtp_status_signal.emit(self.source_id, "ERROR", str(error))
                 now_mono = time.monotonic()
                 meta = packet.metadata
 
@@ -500,6 +533,8 @@ class AICameraWorker(QThread):
             self.error_signal.emit(str(error))
             self.status_signal.emit("ERROR")
         finally:
+            if self._rtp is not None and not self._rtp.close():
+                self.rtp_status_signal.emit(self.source_id, "ERROR", "Encoder stop timed out")
             if use_async_yolo and self.shared_yolo_worker is not None:
                 self.shared_yolo_worker.unregister_camera(self.source_id)
             if camera is not None:
@@ -509,9 +544,11 @@ class AICameraWorker(QThread):
 
     def request_stop(self):
         self._running = False
+        if self._rtp is not None:
+            self._rtp.request_stop()
 
     def stop(self, timeout_ms: int = 3000) -> bool:
-        self._running = False
+        self.request_stop()
         if self.isRunning():
             return bool(self.wait(timeout_ms))
         return True

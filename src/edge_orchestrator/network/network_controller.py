@@ -6,6 +6,7 @@ import os
 import re
 import threading
 
+from edge_orchestrator.core import config
 from edge_orchestrator.network.qos_sync import PolicySyncResult
 from edge_orchestrator.network.vrrp_status import parse_vrrp_brief
 
@@ -37,6 +38,13 @@ DEVICE_ACCESS_MAP = {
     "DSW2": {"ip": "192.168.122.48", "port": 2211},
     "ASW": {"ip": "192.168.122.197", "port": 2221},
 }
+DIRECT_DEVICE_ACCESS_MAP = {
+    "R1": {"ip": "10.255.255.1", "port": 22},
+    "R2": {"ip": "10.255.255.2", "port": 22},
+    "DSW1": {"ip": "10.255.255.11", "port": 22},
+    "DSW2": {"ip": "10.255.255.12", "port": 22},
+    "ASW": {"ip": "192.168.99.100", "port": 22},
+}
 CONFIG_ERROR_PATTERN = r"(?im)^\s*%\s*(?:Invalid|Incomplete|Ambiguous|Error|Unrecognized|Unknown)"
 QOS_SHOW_COMMAND = "show running-config | section policy-map TDTU_DYNAMIC_QOS"
 ACL_NAME = "ACL_ISOLATE_ATTACKER"
@@ -52,7 +60,8 @@ ACL_ACE_LINE_REGEX = re.compile(
 class NetworkController:
     """One instance per device; SSH calls are synchronous for use in a worker."""
 
-    def __init__(self, target_device="R1", username=None, password=None, secret=None):
+    def __init__(self, target_device="R1", username=None, password=None, secret=None,
+                 *, transport=None):
         if not isinstance(target_device, str) or target_device not in DEVICE_ACCESS_MAP:
             raise ValueError(
                 f"Không tìm thấy thiết bị {target_device} trong DEVICE_ACCESS_MAP!")
@@ -62,7 +71,11 @@ class NetworkController:
         if paramiko is None:
             raise RuntimeError(
                 f"Không import được Paramiko: {PARAMIKO_IMPORT_ERROR}")
-        device_info = DEVICE_ACCESS_MAP[target_device]
+        self.transport = transport or os.environ.get("EDGE_SSH_TRANSPORT", "jump")
+        if self.transport not in {"jump", "direct"}:
+            raise ValueError("EDGE_SSH_TRANSPORT must be jump or direct")
+        device_info = (DIRECT_DEVICE_ACCESS_MAP if self.transport == "direct"
+                       else DEVICE_ACCESS_MAP)[target_device]
         self.target_name = target_device
         self.target_ip = device_info["ip"]
         self.target_port = device_info["port"]
@@ -119,6 +132,13 @@ class NetworkController:
         }
 
     def _is_session_alive_unlocked(self) -> bool:
+        if self.transport == "direct":
+            if self._connection is None:
+                return False
+            try:
+                return bool(self._connection.is_alive())
+            except Exception:
+                return False
         if self._connection is None or self._channel is None or self._jump_client is None:
             return False
         transport = self._jump_client.get_transport()
@@ -157,7 +177,8 @@ class NetworkController:
         self._close_session_unlocked()
         channel = jump_client = conn = None
         try:
-            channel, jump_client = self._create_jump_socket()
+            if self.transport == "jump":
+                channel, jump_client = self._create_jump_socket()
             conn = ConnectHandler(**self._get_device_config(channel))
             conn.enable()
             self._channel = channel
@@ -201,7 +222,7 @@ class NetworkController:
         policy = policy.upper()
         if policy not in {"NORMAL", "ALERT"}:
             raise ValueError(f"Policy không hợp lệ: {policy}")
-        bandwidth = 8000 if policy == "ALERT" else 1000
+        bandwidth = config.QOS_PROFILE.bandwidth_kbps(policy)
 
         for attempt in range(2):
             reused_warm = False
@@ -450,3 +471,4 @@ class NetworkController:
 if __name__ == "__main__":
     for name in DEVICE_ACCESS_MAP:
         NetworkController(target_device=name).test_ssh_connection()
+
