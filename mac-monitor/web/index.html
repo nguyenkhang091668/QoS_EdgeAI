@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DATN · Giám sát Edge AI</title><link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><div class="brandmark">D<span>·</span></div><div><b>DATN <span class="brandthin">/ EDGE AI</span></b><small>TRẠM GIÁM SÁT MAC</small></div></div>
+  <div class="header-right"><span class="badge neutral" id="connectionBadge"><i></i>Chưa kết nối Pi</span><time id="clock">—</time></div>
+</header>
+<main>
+  <section class="page-heading"><div><div class="eyebrow">TDTU · NETWORK OPERATIONS</div><h1>Giám sát Edge AI</h1><p>CAM03, trạng thái thiết bị mạng và chính sách QoS.</p></div><div class="readonly"><span>◈</span> Chỉ giám sát</div></section>
+  <div class="notice" id="notice" role="status">Chưa nhận dữ liệu từ Pi. Khởi chạy ứng dụng giám sát trên Pi, rồi mở kết nối từ Mac.</div>
+  <div class="workspace">
+    <section class="card video-card">
+      <div class="card-head"><div class="camera-title"><span class="camera-icon">▣</span><div><h2>CAM03</h2><span class="muted">Camera giám sát · Raspberry Pi</span></div></div><span class="badge neutral" id="videoBadge"><i></i>Đợi video</span></div>
+      <div class="video-stage"><img id="video" alt="Video trực tiếp CAM03 qua RTP" hidden><div class="video-overlay" id="videoOverlay"><div class="lens"><span></span></div><strong id="videoHeading">Đợi luồng CAM03</strong><p id="videoDescription">Hình ảnh sẽ xuất hiện khi bộ phát RTP trên Pi sẵn sàng.</p><span class="transport">RTP / H.264 · UDP 8004</span></div><div class="video-label" id="videoLabel" hidden><i></i>CAM03 · RTP</div></div>
+      <div class="video-foot"><span><i class="tiny-dot"></i>Video nhận qua mạng lab</span><span id="videoAge">Chưa có khung hình</span></div>
+      <div class="video-meta"><div><label>NGUỒN HÌNH ẢNH</label><strong>Luồng RTP CAM03</strong></div><div><label>ENCODER TRÊN PI</label><strong id="encoder">—</strong></div><div><label>KHUNG AI GẦN NHẤT</label><strong id="frameId">—</strong></div></div>
+    </section>
+    <aside class="side-column">
+      <section class="card ai-card"><div class="card-head"><h2>Trạng thái AI</h2><span class="micro-label">XỬ LÝ TRÊN PI</span></div><div class="ai-main" id="aiMain"><span class="state-glyph">◎</span><div><strong id="aiState">CHỜ DỮ LIỆU</strong><p id="aiExplanation">Chưa có quan sát mới từ Pi</p></div></div><div class="ai-details"><div><span>Người trong ROI</span><b id="person">—</b></div><div><span>Tuổi quan sát AI</span><b id="observationAge">—</b></div></div></section>
+      <section class="qos-section"><div class="section-title"><h2>Chính sách QoS</h2><span id="profile">—</span></div><div class="desired"><span>Yêu cầu từ Pi</span><b id="desired">—</b></div>
+        <article class="card router-card"><div class="router-heading"><div class="router-name"><span class="router-icon">⇄</span><b>R1</b></div><span class="badge neutral" id="r1Badge"><i></i>Chưa xác minh</span></div><div class="router-value"><strong id="r1Rate">—</strong><span>kbps</span><b id="r1Policy">—</b></div><div class="router-foot"><span id="r1Detail">Đợi kết quả đọc lại từ router</span><span id="r1Age">—</span></div></article>
+        <article class="card router-card"><div class="router-heading"><div class="router-name"><span class="router-icon">⇄</span><b>R2</b></div><span class="badge neutral" id="r2Badge"><i></i>Chưa xác minh</span></div><div class="router-value"><strong id="r2Rate">—</strong><span>kbps</span><b id="r2Policy">—</b></div><div class="router-foot"><span id="r2Detail">Đợi kết quả đọc lại từ router</span><span id="r2Age">—</span></div></article>
+      </section>
+    </aside>
+  </div>
+  <section class="card network-card" aria-labelledby="networkTitle">
+    <div class="card-head"><div><h2 id="networkTitle">Thiết bị mạng</h2><p class="muted">Phản hồi SNMP và các cổng đang giám sát · dữ liệu từ Pi</p></div><span id="networkSummary" class="network-summary">Chưa có dữ liệu thiết bị</span></div>
+    <div class="device-grid" id="deviceCards"></div>
+    <details class="port-details"><summary id="portCount">Chi tiết các cổng được giám sát</summary>
+      <p class="port-note">RX: nhận vào · TX: truyền ra · đơn vị Mbps. Cổng xuống không đồng nghĩa thiết bị mất kết nối.</p>
+      <div class="port-scroll"><table class="port-table"><thead><tr><th>Thiết bị</th><th>Cổng / kết nối</th><th>Trạng thái</th><th>RX</th><th>TX</th><th>Tuổi mẫu</th></tr></thead><tbody id="portRows"><tr><td colspan="6">Đợi số liệu SNMP từ Pi.</td></tr></tbody></table></div>
+    </details>
+  </section>
+  <div class="lower-grid"><section class="card chart-card"><div class="card-head"><div><h2>Lưu lượng WAN</h2><p class="muted">Tổng lưu lượng tại cổng WAN · SNMP · 60 giây gần nhất</p></div><div class="chart-key"><span class="key-r1">R1 <b id="r1Wan">—</b></span><span class="key-r2">R2 <b id="r2Wan">—</b></span></div></div><div class="chart-wrap"><svg viewBox="0 0 650 150" preserveAspectRatio="none" aria-label="Biểu đồ lưu lượng WAN R1 và R2"><path d="M0 20H650 M0 65H650 M0 110H650" class="gridlines"/><polyline id="lineR1" class="line-r1"/><polyline id="lineR2" class="line-r2"/></svg><div class="chart-empty" id="chartEmpty">Đợi số liệu SNMP từ Pi</div><span class="axis-top" id="axisTop">Mbps</span></div><div class="chart-axis"><span>−60 giây</span><span>Hiện tại</span></div></section>
+  <section class="card events-card"><div class="card-head"><h2>Diễn biến gần đây</h2><span class="micro-label">PHIÊN GIÁM SÁT</span></div><ol id="events"><li class="empty-events">Sự kiện sẽ xuất hiện khi trạng thái thay đổi.</li></ol></section></div>
+  <footer><span><b>Pi</b> xử lý AI & điều khiển · <b>Mac</b> giám sát đầu ra</span><span id="lastUpdated">Chưa nhận trạng thái</span></footer>
+</main>
+</body></html>
