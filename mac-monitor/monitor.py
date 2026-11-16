@@ -119,7 +119,7 @@ class VideoDecoder:
         command = [self.ffmpeg, '-hide_banner', '-loglevel', 'warning', '-nostdin',
                    '-protocol_whitelist', 'file,udp,rtp', '-fflags', 'nobuffer',
                    '-flags', 'low_delay', '-analyzeduration', '1000000',
-                   '-probesize', '1000000', '-i', str(path), '-map', '0:v:0', '-an',
+                   '-probesize', '1000000', '-buffer_size', '1048576', '-i', str(path), '-map', '0:v:0', '-an',
                    '-vf', 'fps=8', '-threads', '2', '-c:v', 'mjpeg', '-q:v', '5',
                    '-f', 'image2pipe', 'pipe:1']
         try:
