@@ -274,6 +274,7 @@ LOCAL_CAMERAS = {
 # Values are validated in the camera worker so encoder configuration errors do not kill AI.
 CAM03_RTP_ENABLED = os.environ.get("CAM03_RTP_ENABLED", "0") == "1"
 CAM03_RTP_CONFIG = {
+    "bitrate_kbps": int(os.environ.get("CAM03_RTP_BITRATE_KBPS","600")),
     "destination": os.environ.get("CAM03_RTP_DESTINATION", "100.108.25.63"),
     "local_address": os.environ.get("CAM03_RTP_LOCAL_ADDRESS", "192.168.10.13"),
     "interface": "eth0",
